@@ -1,0 +1,544 @@
+[
+  {
+    "path": "src/components/ui/button.tsx",
+    "input": {
+      "exports": ["Button", "buttonVariants"],
+      "props": [
+        "All native <button> props",
+        "variant?: default | destructive | outline | secondary | ghost | link | gradient | gradient-blue | gradient-cyan | gradient-green | blue | cyan | selected",
+        "size?: default | sm | lg | xl | icon | icon-sm | icon-lg",
+        "text?: bold | semibold | medium | normal | light",
+        "hoverStrength?: high | med | low",
+        "hoverType?: full | shadowOnly | hoverOnly | none",
+        "asChild?: boolean",
+        "className?: string"
+      ]
+    },
+    "output": "Renders the main shared button primitive or forwards styling onto a slotted child when asChild=true. It does not manage internal state, but it standardizes visual variants, hover motion, focus rings, disabled state, and event forwarding for actions across the app.",
+    "description": "Most reused action component in the codebase (about 90 imports). It is the base CTA/control surface for forms, dialogs, tables, assignment flows, and shared state panels, and it centralizes the project's button styling system through class-variance-authority plus the shared hover wrapper.",
+    "imports": {
+      "components": ["src/components/ui/wrappers/hover.tsx"],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react", "@radix-ui/react-slot", "class-variance-authority"]
+    }
+  },
+  {
+    "path": "src/components/ui/dialog.tsx",
+    "input": {
+      "exports": [
+        "Dialog",
+        "DialogTrigger",
+        "DialogPortal",
+        "DialogClose",
+        "DialogOverlay",
+        "DialogContent",
+        "DialogHeader",
+        "DialogFooter",
+        "DialogTitle",
+        "DialogDescription"
+      ],
+      "props": [
+        "Dialog accepts Radix Dialog root props such as open, defaultOpen, and onOpenChange",
+        "DialogContent accepts all Radix content props plus showCloseButton?: boolean and showOverlay?: boolean",
+        "Header/footer/title/description wrappers accept normal div/title/description props",
+        "className?: string on styled subcomponents"
+      ]
+    },
+    "output": "Provides a complete modal primitive set with portal mounting, overlay rendering, close control, and animated content shell. Open/close state is controlled by the parent through Radix props, so side effects happen in consumers rather than inside this module.",
+    "description": "Shared modal infrastructure used throughout forms, editor flows, and file/assignment management (about 38 imports). It wraps Radix dialog primitives with the project's overlay, spacing, animation, and close-button defaults so feature components can compose dialogs consistently.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react", "@radix-ui/react-dialog", "lucide-react"]
+    }
+  },
+  {
+    "path": "src/components/ui/input.tsx",
+    "input": {
+      "exports": ["Input"],
+      "props": [
+        "All native <input> props",
+        "type?: string",
+        "className?: string"
+      ]
+    },
+    "output": "Renders a ref-forwarding text/file/input field with consistent focus, invalid, disabled, and file-input styling. It has no internal state and simply forwards value/change handling to consumers.",
+    "description": "Shared low-level form field used heavily across auth, CRM, grade editing, and content-management screens (about 33 imports). It normalizes baseline input visuals so business forms do not duplicate Tailwind classes.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react"]
+    }
+  },
+  {
+    "path": "src/components/ui/select.tsx",
+    "input": {
+      "exports": [
+        "Select",
+        "SelectGroup",
+        "SelectValue",
+        "SelectTrigger",
+        "SelectContent",
+        "SelectItem",
+        "SelectScrollUpButton",
+        "SelectScrollDownButton",
+        "SelectLabel",
+        "SelectSeparator"
+      ],
+      "props": [
+        "Select accepts Radix Select root props such as value, defaultValue, onValueChange, open, and onOpenChange",
+        "SelectTrigger adds size?: sm | default and className?: string",
+        "SelectContent accepts Radix content props plus position?: item-aligned | popper and align?: string",
+        "SelectItem/Label/Separator accept the matching Radix primitive props"
+      ]
+    },
+    "output": "Returns a fully composed dropdown/select system with trigger, portal content, scrolling controls, labels, separators, and selectable items. Selection state is owned by the parent via Radix callbacks; this module mainly supplies behavior wrappers and styling.",
+    "description": "Shared selection control used across attendance, auth, library, and scheduling flows (about 16 imports). It gives the app a consistent dropdown experience with blue chevrons, animated portal content, and reusable item rendering.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react", "@radix-ui/react-select", "lucide-react"]
+    }
+  },
+  {
+    "path": "src/components/ui/popover.tsx",
+    "input": {
+      "exports": ["Popover", "PopoverTrigger", "PopoverContent", "PopoverAnchor"],
+      "props": [
+        "Popover accepts Radix Popover root props such as open, defaultOpen, and onOpenChange",
+        "PopoverContent accepts Radix content props plus align?: string, sideOffset?: number, and className?: string",
+        "Trigger/Anchor accept matching Radix primitive props"
+      ]
+    },
+    "output": "Creates anchored floating content via a portal with the project's default sizing, border, shadow, and entry/exit motion. Open state and any business logic remain external to the component consumers.",
+    "description": "Reusable floating-surface primitive used by the phone input, sidebar controls, attendance tabs, and other contextual UI (about 13 imports). It standardizes how lightweight overlays are positioned and styled without forcing feature-specific behavior.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react", "@radix-ui/react-popover"]
+    }
+  },
+  {
+    "path": "src/components/ui/label.tsx",
+    "input": {
+      "exports": ["Label"],
+      "props": [
+        "All Radix Label root props",
+        "className?: string"
+      ]
+    },
+    "output": "Renders a styled semantic label that respects disabled group/peer states. It has no local state and simply improves accessible form labeling.",
+    "description": "Shared form-label primitive used throughout auth, settings, modals, and feedback flows (about 12 imports). It keeps text sizing, spacing, and disabled behavior consistent across the application's forms.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react", "@radix-ui/react-label"]
+    }
+  },
+  {
+    "path": "src/components/ui/checkbox.tsx",
+    "input": {
+      "exports": ["Checkbox"],
+      "props": [
+        "All Radix Checkbox root props such as checked, defaultChecked, and onCheckedChange",
+        "className?: string"
+      ]
+    },
+    "output": "Renders a styled checkbox with an icon indicator and forwards controlled/uncontrolled checked state through Radix. It does not mutate data directly; consumers respond to onCheckedChange.",
+    "description": "Shared boolean-input primitive used in dashboards, filters, attendance flows, and question selection UI (about 11 imports). It centralizes the project's checkbox visuals and checked-state treatment.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react", "@radix-ui/react-checkbox", "lucide-react"]
+    }
+  },
+  {
+    "path": "src/components/ui/dropdown-menu.tsx",
+    "input": {
+      "exports": [
+        "DropdownMenu",
+        "DropdownMenuPortal",
+        "DropdownMenuTrigger",
+        "DropdownMenuContent",
+        "DropdownMenuGroup",
+        "DropdownMenuLabel",
+        "DropdownMenuItem",
+        "DropdownMenuCheckboxItem",
+        "DropdownMenuRadioGroup",
+        "DropdownMenuRadioItem",
+        "DropdownMenuSeparator",
+        "DropdownMenuShortcut",
+        "DropdownMenuSub",
+        "DropdownMenuSubTrigger",
+        "DropdownMenuSubContent"
+      ],
+      "props": [
+        "DropdownMenu accepts Radix root props such as open and onOpenChange",
+        "DropdownMenuContent adds sideOffset?: number and className?: string",
+        "DropdownMenuItem adds inset?: boolean and variant?: default | destructive",
+        "Checkbox/radio/sub-menu exports accept the corresponding Radix primitive props"
+      ]
+    },
+    "output": "Provides a complete contextual action menu system with nested content, checkbox/radio items, and portal-based positioning. State and action side effects are delegated to parent handlers attached to menu items.",
+    "description": "Reusable context-menu/action-menu module used in comment cards, assignments, grade detail views, and journal controls (about 7 imports). It gives complex action menus a consistent interaction model and visual language.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react", "@radix-ui/react-dropdown-menu", "lucide-react"]
+    }
+  },
+  {
+    "path": "src/components/ui/tooltip.tsx",
+    "input": {
+      "exports": ["Tooltip", "TooltipTrigger", "TooltipContent", "TooltipProvider"],
+      "props": [
+        "TooltipProvider accepts delayDuration?: number plus Radix provider props",
+        "Tooltip accepts Radix tooltip root props",
+        "TooltipContent accepts Radix content props plus sideOffset?: number and className?: string",
+        "TooltipTrigger accepts Radix trigger props"
+      ]
+    },
+    "output": "Creates lightweight hover/focus help content with a zero-delay provider by default and portal-mounted tooltip content. It does not own business state beyond transient tooltip visibility.",
+    "description": "Shared micro-help primitive used in editor tools, whiteboard UI, student account switching, and classroom views (about 6 imports). It standardizes transient explanatory UI without each feature reimplementing provider setup.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react", "@radix-ui/react-tooltip"]
+    }
+  },
+  {
+    "path": "src/components/ui/card.tsx",
+    "input": {
+      "exports": [
+        "Card",
+        "CardHeader",
+        "CardTitle",
+        "CardDescription",
+        "CardAction",
+        "CardContent",
+        "CardFooter"
+      ],
+      "props": [
+        "All exports accept standard div props",
+        "className?: string"
+      ]
+    },
+    "output": "Renders a composable card layout system for bordered content blocks with dedicated header/content/footer slots. There is no internal state; the output is purely structural and presentational.",
+    "description": "Shared container module used by dashboards, feed cards, language chooser UI, and chart panels (about 5 imports). It gives feature teams a consistent card anatomy instead of copy-pasting shell markup.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react"]
+    }
+  },
+  {
+    "path": "src/components/ui/textarea.tsx",
+    "input": {
+      "exports": ["Textarea"],
+      "props": [
+        "All native <textarea> props",
+        "className?: string"
+      ]
+    },
+    "output": "Renders a styled multiline input with shared invalid/focus/disabled states. It does not keep local text state and relies on the parent for value and onChange.",
+    "description": "Shared multiline text field used in modals, bug reporting, elective setup, and library forms (about 5 imports). It standardizes the app's editable text-area styling and sizing behavior.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react"]
+    }
+  },
+  {
+    "path": "src/components/ui/loading-screen.tsx",
+    "input": {
+      "exports": ["LoadingScreen"],
+      "props": []
+    },
+    "output": "Renders a full-screen blocking loading overlay with the Alims logo, inline keyframe styles, and a custom spinner/glow effect. It has no inputs and is used as a temporary UI state while auth/bootstrap requests are in progress.",
+    "description": "Global full-screen loader used during app hydration and auth flows (about 5 imports). Unlike the smaller loading-state helpers, this component takes over the viewport and communicates application-level waiting states.",
+    "imports": {
+      "components": [],
+      "utilities": [],
+      "queries": [],
+      "mutations": [],
+      "assets": ["@/assets/icons/alims-logo.svg"],
+      "external": []
+    }
+  },
+  {
+    "path": "src/components/ui/data-state.tsx",
+    "input": {
+      "exports": [
+        "LoadingState",
+        "ErrorState",
+        "EmptyState",
+        "NotFoundState",
+        "UnauthorizedState"
+      ],
+      "props": [
+        "LoadingState: className?: string, iconClassName?: string",
+        "ErrorState/EmptyState/NotFoundState/UnauthorizedState: title?, description?, details?, className?, panelClassName?, iconClassName?, titleClassName?, descriptionClassName?, detailsClassName?",
+        "Optional action object: { label: string, onClick: () => void, disabled?: boolean, variant?: Button variant }"
+      ]
+    },
+    "output": "Renders standardized status panels and loaders for loading, error, empty, not-found, and unauthorized conditions. The only side effect is invoking an optional action callback through the shared Button; all data fetching and retry logic lives in consumers.",
+    "description": "Cross-feature state-feedback module used in classroom lists, vice-principal student pages, and subject pages (about 4 imports). It consolidates repeated empty/error/loading UI into a consistent panel system with optional recovery actions.",
+    "imports": {
+      "components": ["src/components/ui/button.tsx"],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react", "lucide-react"]
+    }
+  },
+  {
+    "path": "src/components/ui/phone-input.tsx",
+    "input": {
+      "exports": [
+        "PhoneInput",
+        "PhoneInputCompact",
+        "countries",
+        "findCountryByCode",
+        "findCountryByDialCode",
+        "parsePhoneNumber"
+      ],
+      "props": [
+        "value: string",
+        "onChange: (value: string) => void",
+        "defaultCountry?: string",
+        "placeholder?: string",
+        "disabled?: boolean",
+        "className?: string",
+        "inputClassName?: string"
+      ]
+    },
+    "output": "Renders a composed phone field with a country selector popover, search box, dial-code picker, and formatted local number input. Internally it manages popover open state, search query, selected country, and local number, then emits a normalized full phone number string through onChange.",
+    "description": "Shared enriched form control used in recovery, registration, and staff-management flows (about 3 imports). It encapsulates country metadata, parsing, formatting, and picker UX so screens receive a single canonical phone string instead of rebuilding the logic.",
+    "imports": {
+      "components": ["src/components/ui/popover.tsx"],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react", "lucide-react"]
+    }
+  },
+  {
+    "path": "src/components/ui/table.tsx",
+    "input": {
+      "exports": [
+        "Table",
+        "TableHeader",
+        "TableBody",
+        "TableFooter",
+        "TableHead",
+        "TableRow",
+        "TableCell",
+        "TableCaption"
+      ],
+      "props": [
+        "Each export accepts the native props for its HTML table element",
+        "className?: string"
+      ]
+    },
+    "output": "Provides a composable table shell with a scroll container plus standardized row, cell, header, and caption styling. It does not manage sorting, selection, or pagination; that behavior stays in consuming features.",
+    "description": "Shared tabular layout module used in capacity views, vice-principal schedule matching, absence dashboards, and time-selection UI (about 4 imports). It acts as the styling baseline for any feature that needs raw table markup.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react"]
+    }
+  },
+  {
+    "path": "src/components/ui/unmount-tab.tsx",
+    "input": {
+      "exports": ["UnmountTab"],
+      "props": [
+        "text: string",
+        "isActive?: boolean",
+        "onClick: () => void",
+        "className?: string"
+      ]
+    },
+    "output": "Renders a pill-style tab button for switching between legacy/unmount screens and password/schedule subviews. It has no internal state and notifies the parent through onClick when the tab is selected.",
+    "description": "Small but repeatedly reused tab control in the unmount area and password/schedule screens (about 5 imports). It standardizes the active/inactive visual treatment for those segmented button groups.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": []
+    }
+  },
+  {
+    "path": "src/components/back-button.tsx",
+    "input": {
+      "exports": ["default BackButton"],
+      "props": [
+        "onClick?: () => void",
+        "name?: string"
+      ]
+    },
+    "output": "Renders a reusable left-arrow back button with optional custom label text. It does not handle navigation itself; consumers pass the desired back action through onClick.",
+    "description": "Frequently reused navigation affordance in unmount flows and restrictions screens (about 7 imports). It keeps back-navigation controls visually consistent across otherwise separate admin forms.",
+    "imports": {
+      "components": [],
+      "utilities": [],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["lucide-react"]
+    }
+  },
+  {
+    "path": "src/components/bug-report-button.tsx",
+    "input": {
+      "exports": ["BugReportButton"],
+      "props": [
+        "className?: string",
+        "variant?: teacher | student",
+        "isStudentDark?: boolean",
+        "isStudentSubjectRoute?: boolean",
+        "embedInHeader?: boolean"
+      ]
+    },
+    "output": "Renders either a teacher-style inline trigger or a student-style floating/header trigger, opens a feedback dialog, manages description/rating/file state, listens for global paste and drag-drop while open, and submits data through GraphQL plus direct attachment uploads. On submit it runs the BUG_REPORT_CREATE mutation, requests upload URLs through the BUG_REPORT_ATTACHMENT_UPLOAD_URL query, uploads files with PUT requests, shows success/error states, and resets local state when the dialog closes or succeeds.",
+    "description": "Shared cross-feature feedback component mounted in multiple high-visibility surfaces including the student shell, book parser header, subject topic layout, and legacy test header (about 4 imports). It is one of the few truly global interactive components because it couples UI, router context, GraphQL mutations, and file-upload behavior into a single reusable entry point for bug reporting.",
+    "imports": {
+      "components": [
+        "src/components/ui/dialog.tsx",
+        "src/components/ui/button.tsx",
+        "src/components/ui/textarea.tsx",
+        "src/components/ui/label.tsx"
+      ],
+      "utilities": ["@/lib/utils"],
+      "queries": ["BUG_REPORT_ATTACHMENT_UPLOAD_URL"],
+      "mutations": ["BUG_REPORT_CREATE"],
+      "assets": [
+        "@/assets/icons/bugReport.svg",
+        "@/assets/icons/bugLuzha.svg",
+        "@/assets/icons/bugReportWhite.svg",
+        "@/assets/icons/bugLuzhaDark.svg",
+        "@/assets/icons/pauk.svg"
+      ],
+      "external": [
+        "react",
+        "@tanstack/react-router",
+        "@apollo/client/react",
+        "motion/react",
+        "lucide-react",
+        "__generated__"
+      ]
+    }
+  },
+  {
+    "path": "src/components/student/ui/student-page-wrapper.tsx",
+    "input": {
+      "exports": ["StudentPageWrapper", "StudentContentScrollable"],
+      "props": [
+        "children: React.ReactNode",
+        "className?: string"
+      ]
+    },
+    "output": "Renders two shared student-shell layout wrappers: a full-height outer page container and a scrollable content region with standard student padding and scrollbar behavior. These components do not manage business state; they provide consistent layout boundaries for student-facing pages.",
+    "description": "Shared student layout primitives reused by the student shell plus grades, leaderboard, and tasks pages (about 4 imports). They keep viewport locking, padding, and scrolling behavior consistent across the student experience.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils"],
+      "queries": [],
+      "mutations": [],
+      "assets": [],
+      "external": ["react"]
+    }
+  },
+  {
+    "path": "src/components/navigation/role-breadcrumbs.tsx",
+    "input": {
+      "exports": ["default RoleBreadcrumbs"],
+      "props": []
+    },
+    "output": "Reads the current router pathname, derives role-aware breadcrumb items, translates known route segments, hides dynamic ID segments, optionally collapses long trails with an ellipsis, and renders a fixed breadcrumb bar. It does not mutate data; it reacts to router state and translation context.",
+    "description": "App-shell navigation component mounted globally in the admin shell. Even though it is not imported in many files directly, it is effectively a global component because every admin page can render through it, and it centralizes route-to-breadcrumb logic instead of duplicating that work in page components.",
+    "imports": {
+      "components": ["src/components/ui/breadcrumb.tsx", "src/components/test/i18n/I18nContext.tsx"],
+      "utilities": [],
+      "queries": [],
+      "mutations": [],
+      "assets": ["@/assets/icons/main.svg", "@/assets/icons/mainPage.svg"],
+      "external": ["@tanstack/react-router"]
+    }
+  },
+  {
+    "path": "src/components/sidebar/sidebar.tsx",
+    "input": {
+      "exports": ["Sidebar", "SidebarMenuItem"],
+      "props": [
+        "isSidebarOpen?: boolean",
+        "onSidebarOpen?: (isVisible: boolean) => void",
+        "guidedItemId?: string | null",
+        "guidedClickedItemId?: string | null",
+        "principalButtons?: Array<{ id: string; label: string; onClick?: () => void }>",
+        "zavuchButtons?: Array<{ id: string; label: string; onClick?: () => void }>",
+        "classTeacherButtons?: Array<{ id: string; label: string; onClick?: () => void }>",
+        "teacherButtons?: Array<{ id: string; label: string; onClick?: () => void }>",
+        "Standard div HTML props via React.HTMLAttributes<HTMLDivElement>"
+      ]
+    },
+    "output": "Renders the main admin sidebar with grouped role-specific menu sections, a collapsible icon-only state, guided/highlighted items, and click-outside closing behavior. It reads auth-store role data, lazily fetches the employee role after hydration when missing, tracks active/open group state locally, and forwards menu selection/open-close events back to parent shell handlers.",
+    "description": "Primary global navigation surface for the admin shell. It is not a tiny reusable control, but it is an app-wide component because it orchestrates the navigation experience for principal, vice-principal, class-teacher, and teacher roles from one shared implementation.",
+    "imports": {
+      "components": [],
+      "utilities": ["@/lib/utils", "@/lib/authStore", "@/lib/navigation/constants"],
+      "queries": [],
+      "mutations": [],
+      "assets": [
+        "@/assets/icons/burgerMenu.svg",
+        "@/assets/icons/schedule_icon.svg",
+        "@/assets/icons/students_icon.svg",
+        "@/assets/icons/teachers_icon.svg",
+        "@/assets/icons/study_icon.svg",
+        "@/assets/icons/payments_icon.svg",
+        "@/assets/icons/learning_resources_icon.svg"
+      ],
+      "external": ["react"]
+    }
+  }
+]

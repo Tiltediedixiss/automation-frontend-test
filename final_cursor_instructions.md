@@ -1,0 +1,12 @@
+- Implement drag-and-drop functionality for items in the Student Folder route.  
+- Ensure the feature is available across all student accounts, not just one.  
+- Inspect the following components first:  
+  - `src/components/student/folder/page.tsx#StudentFolder`  
+  - `src/routes/student/folder/index.tsx#RouteComponent`  
+  - `src/components/student/folder/page.tsx#SortableCourseCard`  
+- The functionality is currently hardcoded for a single student account; remove this restriction and make it dynamically available per student account.  
+- Verify that the drag-and-drop behavior persists across account switches without requiring reimplementation per user.  
+- Acceptance checklist:  
+  - Drag-and-drop is functional within the Student Folder route.  
+  - The feature is accessible and consistent when switching between any student accounts.  
+  - No hardcoding of account-specific logic remains in the implementation.
