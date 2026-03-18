@@ -29,6 +29,14 @@ app = FastAPI(title="Alims Pipeline API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
+@app.on_event("startup")
+def _log_graphrag_path() -> None:
+    p = getattr(pipeline, "GRAPHRAG_DOCS", None)
+    if p is not None:
+        exists = getattr(p, "exists", lambda: False)()
+        print(f"GraphRAG docs path: {p} (exists={exists})")
+
+
 def verify(x_api_key: str = Header(default="")) -> None:
     if API_SECRET and x_api_key != API_SECRET:
         raise HTTPException(401, "Invalid API key")

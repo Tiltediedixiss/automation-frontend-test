@@ -34,7 +34,7 @@ TWELVELABS_KEY    = os.getenv("TWELVELABS_API_KEY", "").strip().strip("\"'")
 GOOGLE_API_KEY    = os.getenv("GOOGLE_API_KEY", "").strip().strip("\"'")
 INDEX_ARN         = os.getenv("AWS_S3_VECTOR_INDEX_ARN", "").strip().strip("\"'")
 AWS_REGION        = os.getenv("AWS_REGION", "eu-central-1")
-GRAPHRAG_DOCS     = Path(__file__).parent / "generated" / "graphrag-documents.json"
+GRAPHRAG_DOCS     = Path(__file__).resolve().parent / "generated" / "graphrag-documents.json"
 INDEX_NAME_PREFIX = "cursor-feature-requests"
 MAX_UPLOAD_MB     = 200
 
@@ -284,7 +284,12 @@ Only include changes actually requested by the PM. Omit generic UI descriptions 
 
 
 def _retrieve_rag_context(spec: dict) -> dict:
-    sys.path.insert(0, str(Path(__file__).parent))
+    if not GRAPHRAG_DOCS.exists():
+        raise FileNotFoundError(
+            f"GraphRAG documents file not found: {GRAPHRAG_DOCS} (resolved from {Path(__file__).resolve()}). "
+            "Ensure generated/graphrag-documents.json exists and is included in the Docker image."
+        )
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from query_rag import GraphRAGRetriever, infer_region  # noqa: PLC0415
 
     aws_region = AWS_REGION or infer_region(INDEX_ARN)
@@ -489,7 +494,9 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
             resolved_files   = _extract_file_paths(rag_context)
             print(f"[{label}] RAG resolved {len(resolved_files)} file(s)")
         except Exception as exc:
-            print(f"[{label}] ⚠ GraphRAG failed: {exc}")
+            import traceback
+            print(f"[{label}] ⚠ GraphRAG failed: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
             rag_context, rag_context_text, resolved_files = {}, "(not available)", []
 
         # ── Step 5: Generate Cursor instructions ────────────────────────
