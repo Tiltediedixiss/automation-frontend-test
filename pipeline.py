@@ -243,28 +243,32 @@ def _extract_relevant_screenshots(video_path: str, moments: list[dict]) -> list[
 def _extract_first_order_spec(video_id: str, transcript: str, tl_transcript: str) -> dict:
     response = client.analyze(
         video_id=video_id,
-        prompt=f"""You are extracting a FIRST-ORDER implementation spec from a feature-request video for Alims.
+        prompt=f"""You are extracting a complete implementation spec from a product feature-request video for Alims.
 
-The product already has existing UI/UX and modules. Ignore baseline product structure and extract only what the PM is asking to change or add.
+Alims has three existing modules: teacher, student, principal. Do NOT re-describe their baseline behavior.
+However, if the PM is requesting a change, fix, or addition TO any existing module, screen, or component — include it. Modifications to existing surfaces are in scope.
 
-Primary transcript (authoritative):
+Your goal is HIGH RECALL. It is better to include something borderline than to miss a real request.
+
+PRIMARY TRANSCRIPT — treat this as ground truth for what the PM said:
 ---
 {transcript or "(no transcript available)"}
 ---
 
-Secondary transcript from Twelve Labs (supporting only):
+SECONDARY TRANSCRIPT from Twelve Labs — use only for screen/UI disambiguation:
 ---
 {tl_transcript or "(not available)"}
 ---
 
-Return a compact structured spec with:
-- summary: one short paragraph of the requested change
-- search_query: one retrieval-friendly query for GraphRAG
-- requested_changes: a list of concrete changes to implement
-- affected_surfaces: routes, screens, modules, or components mentioned or visually implied with high confidence
+Extract the following and be exhaustive:
 
-Only include changes actually requested by the PM. Omit generic UI descriptions and existing product capabilities.""",
-        temperature=0,
+- summary: A complete paragraph describing everything the PM wants changed or added. Do not shorten.
+- search_query: A dense retrieval query covering all topics mentioned (components, routes, behaviors).
+- requested_changes: Every distinct change, fix, or new behavior the PM requested — one item per action. Do not merge unrelated changes into one bullet. Do not omit any.
+- affected_surfaces: Every route, screen, component, or module the PM mentions or that is clearly shown while they are describing a change.
+
+Do not invent requirements. Do not omit requirements the PM stated.""",
+        temperature=0.35,
         response_format=ResponseFormat(
             type="json_schema",
             json_schema={
@@ -273,12 +277,12 @@ Only include changes actually requested by the PM. Omit generic UI descriptions 
                     "summary":           {"type": "string"},
                     "search_query":      {"type": "string"},
                     "requested_changes": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                    "affected_surfaces": {"type": "array", "items": {"type": "string"}, "minItems": 0},
+                    "affected_surfaces": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["summary", "search_query", "requested_changes", "affected_surfaces"],
             },
         ),
-        max_tokens=900,
+        max_tokens=4096,
     )
     return json.loads(response.data or "{}")
 
