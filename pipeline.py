@@ -392,6 +392,44 @@ def _extract_file_paths(rag_context: dict) -> list[str]:
     return paths
 
 
+def _truncate_text(value: str, max_chars: int) -> str:
+    text = (value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def _analyze_stream_text(video_id: str, prompt: str, label: str, section: str, retries: int = 2) -> str:
+    """
+    Stream text from TwelveLabs analyze endpoint with retry.
+    Raises RuntimeError after retries to preserve strict failure semantics.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        chunks: list[str] = []
+        try:
+            text_stream = client.analyze_stream(video_id=video_id, prompt=prompt)
+            for chunk in text_stream:
+                if chunk.event_type == "text_generation":
+                    chunks.append(chunk.text)
+            text = "".join(chunks).strip()
+            if text:
+                return text
+            last_error = RuntimeError(f"{section}: empty output")
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            print(
+                f"[{label}] ⚠ Step 5/{section} attempt {attempt} failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        if attempt < retries:
+            time.sleep(2)
+
+    raise RuntimeError(
+        f"Step 5/{section} failed after retry: {type(last_error).__name__}: {last_error}"
+    ) from last_error
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -515,91 +553,80 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
 
         # ── Step 5: Generate Cursor instructions ────────────────────────
         print(f"\n[{label}] --- Step 5: Generating Cursor instructions ---")
-        pm_prompt = f"""Context: The product is Alims. It already has a ready UI/UX and these modules: teacher, student, principal. Do NOT describe or list these existing features.
+        spec_json = json.dumps(spec, ensure_ascii=False, indent=2)
+        # Keep Step 5 prompt safely under TwelveLabs input limits.
+        rag_context_for_prompt = _truncate_text(rag_context_text, 2600)
+        transcript_for_prompt = _truncate_text(transcript, 2200)
+        tl_transcript_for_prompt = _truncate_text(tl_transcript, 900)
+        thumbnail_urls_for_prompt = "\n".join(thumbnail_urls[:5]) if thumbnail_urls else "(not available)"
+        screenshot_paths_for_prompt = "\n".join(screenshot_paths[:5]) if screenshot_paths else "(not available)"
 
-Your job: Extract ONLY the new or changed requirements that the PM (product manager) is asking for in this feature-request video.
+        core_rules = """Context: The product is Alims. It already has a ready UI/UX and modules (teacher/student/principal). 
+Do NOT describe existing baseline UI/UX.
+Extract only PM-requested changes.
+If something is visible but not requested, omit it.
+If uncertain/inferred, omit it.
+Use concise bullet points."""
 
-Source priority:
-1. The FIRST-ORDER SPEC below is the primary source of truth for requested changes.
-2. The GraphRAG context below tells you what is already implemented and which files/components are likely relevant.
-3. The Google Gemini transcript is supporting evidence.
-4. The video understanding from Twelve Labs is only for screen/module disambiguation.
-5. Ignore any UI, flow, or module that is simply part of the already existing Alims product unless the PM explicitly asks to change it.
-
-Filtering rules:
-- Include only requested changes, bugs to fix, or new behaviors to implement.
-- If something is visible in the video but not requested by the PM, omit it.
-- If something is uncertain or only inferred from visuals, omit it.
-- Do not restate baseline UI/UX, teacher/student/principal modules, or generic product descriptions.
-
-FIRST-ORDER SPEC:
----
-{json.dumps(spec, ensure_ascii=False, indent=2)}
----
+        shared_small = f"""FIRST-ORDER SPEC:
+{_truncate_text(spec_json, 2200)}
 
 GRAPHRAG CONTEXT:
----
-{rag_context_text}
----
+{_truncate_text(rag_context_for_prompt, 1600) or "(not available)"}
 
-TRANSCRIPT of what the PM said (from Google Gemini STT):
----
-{transcript or "(no transcript available)"}
----
+TRANSCRIPT (Gemini):
+{_truncate_text(transcript_for_prompt, 1400) or "(no transcript available)"}"""
 
-OPTIONAL SUPPORTING CONTEXT from Twelve Labs:
-Twelve Labs transcript:
----
-{tl_transcript or "(not available)"}
----
+        changes_prompt = f"""{core_rules}
+{shared_small}
 
-Thumbnail URLs:
----
-{chr(10).join(thumbnail_urls[:12]) if thumbnail_urls else "(not available)"}
----
+Task: Output ONLY section:
+## Requested changes
+- bullets only."""
 
-Relevant screenshots extracted from the source video:
----
-{chr(10).join(screenshot_paths) if screenshot_paths else "(not available)"}
----
+        files_prompt = f"""{core_rules}
+FIRST-ORDER SPEC:
+{_truncate_text(spec_json, 1600)}
 
-Instructions: Write a detailed, Cursor-ready implementation brief for developers that contains:
-- requested changes only
-- likely existing files/components to inspect first (reference them as @filepath)
-- implementation constraints inferred from current code
-- a short acceptance checklist
+GRAPHRAG CONTEXT:
+{_truncate_text(rag_context_for_prompt, 2200) or "(not available)"}
 
-Use concise bullet points. Do not include generic UI/UX or module descriptions. Output ONLY the brief text—no preamble or summary."""
+Task: Output ONLY section:
+## Likely existing files/components to inspect first
+- Use @filepath bullets only.
+- Max 8 bullets."""
 
-        final_chunks: list[str] = []
-        step5_error: Exception | None = None
-        for attempt in (1, 2):
-            try:
-                final_chunks = []
-                text_stream = client.analyze_stream(video_id=indexed_asset.id, prompt=pm_prompt)
-                for chunk in text_stream:
-                    if chunk.event_type == "text_generation":
-                        print(chunk.text, end="", flush=True)
-                        final_chunks.append(chunk.text)
-                print()  # newline after stream
-                step5_error = None
-                break
-            except Exception as exc:
-                step5_error = exc
-                print(f"[{label}] ⚠ Step 5 generation attempt {attempt} failed: {type(exc).__name__}: {exc}")
-                if attempt == 1:
-                    print(f"[{label}] Retrying Step 5 once...")
-                    time.sleep(2)
+        constraints_prompt = f"""{core_rules}
+{shared_small}
+TwelveLabs transcript:
+{_truncate_text(tl_transcript_for_prompt, 700) or "(not available)"}
 
-        instructions = "".join(final_chunks).strip()
+Task: Output ONLY section:
+## Implementation constraints
+- bullets only, max 8."""
+
+        checklist_prompt = f"""{core_rules}
+FIRST-ORDER SPEC:
+{_truncate_text(spec_json, 1600)}
+
+Task: Output ONLY section:
+## Acceptance checklist
+- bullets only, max 8."""
+
+        changes_section = _analyze_stream_text(indexed_asset.id, changes_prompt, label, "requested_changes")
+        files_section = _analyze_stream_text(indexed_asset.id, files_prompt, label, "files")
+        constraints_section = _analyze_stream_text(indexed_asset.id, constraints_prompt, label, "constraints")
+        checklist_section = _analyze_stream_text(indexed_asset.id, checklist_prompt, label, "checklist")
+
+        instructions = "\n\n".join(
+            part.strip()
+            for part in [changes_section, files_section, constraints_section, checklist_section]
+            if part and part.strip()
+        ).strip()
         if not instructions:
-            if step5_error is not None:
-                raise RuntimeError(
-                    f"Step 5 instruction generation failed after retry: "
-                    f"{type(step5_error).__name__}: {step5_error}"
-                ) from step5_error
             raise RuntimeError("Step 5 instruction generation produced empty output.")
-        elif resolved_files:
+
+        if resolved_files:
             instructions += "\n\n## Files to open\n\n"
             instructions += "\n".join(f"@{p}" for p in resolved_files)
 
