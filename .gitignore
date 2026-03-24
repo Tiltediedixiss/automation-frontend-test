@@ -14,6 +14,7 @@ relevant_screenshots/
 
 first_order_spec.json
 rag_context.json
+generated/rag-manifest.json
 relevant_timestamps.json
 taskdef.json
 s3-read-policy.json

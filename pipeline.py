@@ -37,6 +37,8 @@ AWS_REGION        = os.getenv("AWS_REGION", "eu-central-1")
 GRAPHRAG_DOCS     = Path(__file__).resolve().parent / "generated" / "graphrag-documents.json"
 INDEX_NAME_PREFIX = "cursor-feature-requests"
 MAX_UPLOAD_MB     = 200
+PIPELINE_FAST_MODE = os.getenv("PIPELINE_FAST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+INDEX_POLL_SECONDS = 2 if PIPELINE_FAST_MODE else 5
 
 if not TWELVELABS_KEY:
     raise RuntimeError("Missing TWELVELABS_API_KEY in environment/.env")
@@ -451,11 +453,15 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
                 break
             if indexed_asset.status == "failed":
                 raise RuntimeError("TwelveLabs indexing failed.")
-            time.sleep(5)
+            time.sleep(INDEX_POLL_SECONDS)
 
         # ── Step 3.5: TwelveLabs artifacts ──────────────────────────────
-        tl_transcript, thumbnail_urls = _fetch_twelvelabs_artifacts(index.id, indexed_asset.id)
-        print(f"[{label}] TL transcript: {len(tl_transcript)} chars, thumbnails: {len(thumbnail_urls)}")
+        if PIPELINE_FAST_MODE:
+            tl_transcript, thumbnail_urls = "", []
+            print(f"[{label}] FAST_MODE: skipping TwelveLabs artifacts fetch")
+        else:
+            tl_transcript, thumbnail_urls = _fetch_twelvelabs_artifacts(index.id, indexed_asset.id)
+            print(f"[{label}] TL transcript: {len(tl_transcript)} chars, thumbnails: {len(thumbnail_urls)}")
 
         # ── Step 4: Gemini transcription ────────────────────────────────
         print(f"\n[{label}] --- Step 4: Transcribing with Google Gemini ---")
@@ -468,13 +474,17 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
 
         # ── Step 4.5: Screenshots ───────────────────────────────────────
         print(f"\n[{label}] --- Step 4.5: Relevant timestamps + screenshots ---")
-        try:
-            moments          = _identify_relevant_moments(indexed_asset.id, transcript)
-            screenshot_paths = _extract_relevant_screenshots(video_path, moments)
-            print(f"[{label}] Screenshots: {len(screenshot_paths)}")
-        except Exception as exc:
-            print(f"[{label}] ⚠ Screenshots failed: {exc}")
+        if PIPELINE_FAST_MODE:
             moments, screenshot_paths = [], []
+            print(f"[{label}] FAST_MODE: skipping timestamps + screenshots")
+        else:
+            try:
+                moments          = _identify_relevant_moments(indexed_asset.id, transcript)
+                screenshot_paths = _extract_relevant_screenshots(video_path, moments)
+                print(f"[{label}] Screenshots: {len(screenshot_paths)}")
+            except Exception as exc:
+                print(f"[{label}] ⚠ Screenshots failed: {exc}")
+                moments, screenshot_paths = [], []
 
         # ── Step 4.6: First-order spec ──────────────────────────────────
         print(f"\n[{label}] --- Step 4.6: Extracting first-order spec ---")
@@ -562,16 +572,34 @@ Instructions: Write a detailed, Cursor-ready implementation brief for developers
 Use concise bullet points. Do not include generic UI/UX or module descriptions. Output ONLY the brief text—no preamble or summary."""
 
         final_chunks: list[str] = []
-        text_stream = client.analyze_stream(video_id=indexed_asset.id, prompt=pm_prompt)
-        for chunk in text_stream:
-            if chunk.event_type == "text_generation":
-                print(chunk.text, end="", flush=True)
-                final_chunks.append(chunk.text)
-        print()  # newline after stream
+        step5_error: Exception | None = None
+        for attempt in (1, 2):
+            try:
+                final_chunks = []
+                text_stream = client.analyze_stream(video_id=indexed_asset.id, prompt=pm_prompt)
+                for chunk in text_stream:
+                    if chunk.event_type == "text_generation":
+                        print(chunk.text, end="", flush=True)
+                        final_chunks.append(chunk.text)
+                print()  # newline after stream
+                step5_error = None
+                break
+            except Exception as exc:
+                step5_error = exc
+                print(f"[{label}] ⚠ Step 5 generation attempt {attempt} failed: {type(exc).__name__}: {exc}")
+                if attempt == 1:
+                    print(f"[{label}] Retrying Step 5 once...")
+                    time.sleep(2)
 
         instructions = "".join(final_chunks).strip()
-
-        if resolved_files:
+        if not instructions:
+            if step5_error is not None:
+                raise RuntimeError(
+                    f"Step 5 instruction generation failed after retry: "
+                    f"{type(step5_error).__name__}: {step5_error}"
+                ) from step5_error
+            raise RuntimeError("Step 5 instruction generation produced empty output.")
+        elif resolved_files:
             instructions += "\n\n## Files to open\n\n"
             instructions += "\n".join(f"@{p}" for p in resolved_files)
 

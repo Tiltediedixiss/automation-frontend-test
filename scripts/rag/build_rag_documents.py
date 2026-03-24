@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,14 @@ ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = ROOT / "generated"
 OUTPUT_PATH = OUTPUT_DIR / "graphrag-documents.json"
 
-SOURCE_COMPONENTS = ROOT / "our_components.json"
+DEFAULT_SOURCE = ROOT / "our_components.json"
+
+
+def _source_file_str(source_path: Path) -> str:
+    try:
+        return str(source_path.relative_to(ROOT))
+    except ValueError:
+        return str(source_path)
 
 
 def slugify(value: str) -> str:
@@ -240,7 +248,13 @@ def build_bundle_documents(components: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def main() -> None:
-    module_components = json.loads(SOURCE_COMPONENTS.read_text(encoding="utf-8"))
+    source_path = DEFAULT_SOURCE
+    if len(sys.argv) > 1:
+        source_path = Path(sys.argv[1]).resolve()
+    if not source_path.exists():
+        raise FileNotFoundError(f"Components file not found: {source_path}")
+
+    module_components = json.loads(source_path.read_text(encoding="utf-8"))
 
     documents = [
         *build_module_component_documents(module_components),
@@ -251,7 +265,7 @@ def main() -> None:
     counts = Counter(doc["type"] for doc in documents)
     payload = {
         "generatedAt": datetime.utcnow().isoformat() + "Z",
-        "sourceFiles": [str(SOURCE_COMPONENTS.relative_to(ROOT))],
+        "sourceFiles": [_source_file_str(source_path)],
         "counts": dict(counts),
         "documents": documents,
     }
@@ -259,7 +273,7 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    print(f"Generated {len(documents)} GraphRAG documents -> {OUTPUT_PATH.relative_to(ROOT)}")
+    print(f"Generated {len(documents)} GraphRAG documents from {source_path.name} -> {OUTPUT_PATH.relative_to(ROOT)}")
     print(dict(counts))
 
 
