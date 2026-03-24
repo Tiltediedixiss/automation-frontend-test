@@ -12,7 +12,11 @@ from dotenv import load_dotenv
 from google import genai
 
 
-ROOT = Path(__file__).resolve().parents[2]
+_HERE = Path(__file__).resolve()
+# Works in both layouts:
+# - local script under repo root: <repo>/query_rag.py
+# - packaged script under /app in Docker/Render: /app/query_rag.py
+ROOT = _HERE.parent
 DOCUMENTS_PATH = ROOT / "generated" / "graphrag-documents.json"
 DEFAULT_OUTPUT_PATH = ROOT / "generated" / "last-rag-query.json"
 EMBED_MODEL = "gemini-embedding-001"
