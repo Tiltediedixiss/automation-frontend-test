@@ -3,11 +3,9 @@ pipeline.py
 -----------
 Core pipeline: S3 key in → result dict out.
 
-All functions are copied verbatim from test_twelvelabs.py.
-The only changes:
-  - no local file writes (those were only for debugging)
-  - video is downloaded from S3 instead of read from disk
-  - returns a plain dict instead of writing .md / .json files
+TwelveLabs is used ONLY for video indexing and visual moment identification.
+All text-based analysis (spec extraction, instruction generation) uses Gemini
+to avoid burning through TwelveLabs' 50 req/day rate limit.
 """
 
 from __future__ import annotations
@@ -23,13 +21,12 @@ from typing import Any
 
 import boto3
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 from twelvelabs import ResponseFormat, TwelveLabs
 
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Config  (from environment — same names as your .env)
-# ---------------------------------------------------------------------------
 TWELVELABS_KEY    = os.getenv("TWELVELABS_API_KEY", "").strip().strip("\"'")
 GOOGLE_API_KEY    = os.getenv("GOOGLE_API_KEY", "").strip().strip("\"'")
 INDEX_ARN         = os.getenv("AWS_S3_VECTOR_INDEX_ARN", "").strip().strip("\"'")
@@ -49,11 +46,8 @@ if not INDEX_ARN:
 
 _s3     = boto3.client("s3", region_name=AWS_REGION)
 client  = TwelveLabs(api_key=TWELVELABS_KEY)
+_gemini = genai.Client(api_key=GOOGLE_API_KEY.strip())
 
-
-# ---------------------------------------------------------------------------
-# Helpers — identical to test_twelvelabs.py
-# ---------------------------------------------------------------------------
 
 def _get_duration_seconds(path: str) -> float:
     out = subprocess.run(
@@ -107,9 +101,6 @@ def _compress_if_needed(path: str, max_mb: float = MAX_UPLOAD_MB) -> str:
 
 
 def _transcribe_with_google(video_path: str) -> str:
-    from google import genai
-    from google.genai import types
-
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         wav_path = f.name
     try:
@@ -122,9 +113,8 @@ def _transcribe_with_google(video_path: str) -> str:
         if rc.returncode != 0:
             raise RuntimeError(f"ffmpeg failed: {rc.stderr or rc.stdout}")
         audio_bytes = Path(wav_path).read_bytes()
-        ai = genai.Client(api_key=GOOGLE_API_KEY.strip())
         print("  Transcribing with Gemini...")
-        response = ai.models.generate_content(
+        response = _gemini.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
                 (
@@ -156,7 +146,7 @@ def _create_fresh_index():
         ],
         addons=["thumbnail"],
     )
-    print(f"✅ Index created: {index.id}")
+    print(f"  Index created: {index.id}")
     return index
 
 
@@ -242,10 +232,23 @@ def _extract_relevant_screenshots(video_path: str, moments: list[dict]) -> list[
     return paths
 
 
-def _extract_first_order_spec(video_id: str, transcript: str, tl_transcript: str) -> dict:
-    response = client.analyze(
-        video_id=video_id,
-        prompt=f"""You are extracting a complete implementation spec from a product feature-request video for Alims.
+def _gemini_json(prompt: str, max_tokens: int = 4096) -> dict:
+    response = _gemini.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.3,
+            max_output_tokens=max_tokens,
+            response_mime_type="application/json",
+        ),
+    )
+    text = (response.text or "").strip()
+    text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    return json.loads(text) if text else {}
+
+
+def _extract_first_order_spec(transcript: str, tl_transcript: str) -> dict:
+    prompt = f"""You are extracting a complete implementation spec from a product feature-request video for Alims.
 
 Alims has three existing modules: teacher, student, principal. Do NOT re-describe their baseline behavior.
 However, if the PM is requesting a change, fix, or addition TO any existing module, screen, or component — include it. Modifications to existing surfaces are in scope.
@@ -269,24 +272,10 @@ Extract the following and be exhaustive:
 - requested_changes: Every distinct change, fix, or new behavior the PM requested — one item per action. Do not merge unrelated changes into one bullet. Do not omit any.
 - affected_surfaces: Every route, screen, component, or module the PM mentions or that is clearly shown while they are describing a change.
 
-Do not invent requirements. Do not omit requirements the PM stated.""",
-        temperature=0.35,
-        response_format=ResponseFormat(
-            type="json_schema",
-            json_schema={
-                "type": "object",
-                "properties": {
-                    "summary":           {"type": "string"},
-                    "search_query":      {"type": "string"},
-                    "requested_changes": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                    "affected_surfaces": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["summary", "search_query", "requested_changes", "affected_surfaces"],
-            },
-        ),
-        max_tokens=4096,
-    )
-    return json.loads(response.data or "{}")
+Do not invent requirements. Do not omit requirements the PM stated.
+
+Respond with a JSON object with keys: summary, search_query, requested_changes (array of strings), affected_surfaces (array of strings)."""
+    return _gemini_json(prompt, max_tokens=4096)
 
 
 def _retrieve_rag_context(spec: dict) -> dict:
@@ -296,7 +285,7 @@ def _retrieve_rag_context(spec: dict) -> dict:
             "Ensure generated/graphrag-documents.json exists and is included in the Docker image."
         )
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from query_rag import GraphRAGRetriever, infer_region  # noqa: PLC0415
+    from query_rag import GraphRAGRetriever, infer_region
 
     aws_region = AWS_REGION or infer_region(INDEX_ARN)
     retriever  = GraphRAGRetriever(
@@ -371,11 +360,6 @@ def _format_rag_context(result: dict) -> str:
 
 
 def _extract_file_paths(rag_context: dict) -> list[str]:
-    """
-    Pull unique file paths from RAG results.
-    sourcePath is like "src/components/student/folder/page.tsx#StudentFolder"
-    — strip the #Symbol suffix to get the plain file path.
-    """
     seen:  set[str]  = set()
     paths: list[str] = []
     all_components = (
@@ -392,67 +376,71 @@ def _extract_file_paths(rag_context: dict) -> list[str]:
     return paths
 
 
-def _truncate_text(value: str, max_chars: int) -> str:
-    text = (value or "").strip()
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 1].rstrip() + "…"
+def _generate_cursor_instructions(
+    spec: dict,
+    transcript: str,
+    tl_transcript: str,
+    rag_context_text: str,
+    resolved_files: list[str],
+) -> str:
+    spec_json = json.dumps(spec, ensure_ascii=False, indent=2)
+
+    prompt = f"""You are generating detailed Cursor IDE instructions for a developer implementing PM-requested changes to Alims.
+
+Context: The product is Alims. It already has a ready UI/UX and modules (teacher/student/principal).
+Do NOT describe existing baseline UI/UX.
+Extract only PM-requested changes.
+If something is visible but not requested, omit it.
+If uncertain/inferred, omit it.
+
+FIRST-ORDER SPEC:
+{spec_json}
+
+GRAPHRAG CONTEXT (codebase structure):
+{rag_context_text or "(not available)"}
+
+TRANSCRIPT (Gemini):
+{transcript or "(no transcript available)"}
+
+TWELVELABS TRANSCRIPT:
+{tl_transcript or "(not available)"}
+
+RESOLVED FILES FROM RAG:
+{json.dumps(resolved_files) if resolved_files else "(none)"}
+
+Generate a complete Cursor prompt with these sections. Use concise bullet points:
+
+## Requested changes
+- Every distinct change the PM requested, one bullet per change.
+
+## Likely existing files/components to inspect first
+- @filepath format, max 8 bullets. Use the resolved files from RAG plus any you infer from context.
+
+## Implementation constraints
+- Technical constraints, edge cases, things to watch out for. Max 8 bullets.
+
+## Acceptance checklist
+- How to verify each change works. Max 8 bullets.
+
+Output ONLY the markdown sections above, nothing else."""
+
+    response = _gemini.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.3,
+            max_output_tokens=4096,
+        ),
+    )
+    return (response.text or "").strip()
 
 
-def _analyze_stream_text(video_id: str, prompt: str, label: str, section: str, retries: int = 2) -> str:
-    """
-    Stream text from TwelveLabs analyze endpoint with retry.
-    Raises RuntimeError after retries to preserve strict failure semantics.
-    """
-    last_error: Exception | None = None
-    for attempt in range(1, retries + 1):
-        chunks: list[str] = []
-        try:
-            text_stream = client.analyze_stream(video_id=video_id, prompt=prompt)
-            for chunk in text_stream:
-                if chunk.event_type == "text_generation":
-                    chunks.append(chunk.text)
-            text = "".join(chunks).strip()
-            if text:
-                return text
-            last_error = RuntimeError(f"{section}: empty output")
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            print(
-                f"[{label}] ⚠ Step 5/{section} attempt {attempt} failed: "
-                f"{type(exc).__name__}: {exc}"
-            )
-        if attempt < retries:
-            time.sleep(2)
-
-    raise RuntimeError(
-        f"Step 5/{section} failed after retry: {type(last_error).__name__}: {last_error}"
-    ) from last_error
-
-
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
 def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
-    """
-    Download video from S3, run the full pipeline, return result dict.
-
-    Returns:
-        {
-            "task_id":      str,
-            "summary":      str,
-            "files":        list[str],
-            "instructions": str,
-        }
-
-    Raises on unrecoverable errors so the caller (API or CLI) can handle them.
-    """
     label = task_id or s3_key
     video_path: str | None = None
     to_upload:  str | None = None
 
     try:
-        # ── Download from S3 ────────────────────────────────────────────
         print(f"[{label}] Downloading s3://{s3_bucket}/{s3_key}")
         fd, video_path = tempfile.mkstemp(suffix=".mp4")
         os.close(fd)
@@ -460,7 +448,6 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
         size_mb = os.path.getsize(video_path) / (1024 * 1024)
         print(f"[{label}] Downloaded: {size_mb:.1f} MB")
 
-        # ── Compress if needed ──────────────────────────────────────────
         to_upload = _compress_if_needed(video_path)
 
         # ── Step 1: Create TwelveLabs index ────────────────────────────
@@ -507,13 +494,13 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
             transcript = _transcribe_with_google(video_path)
             print(f"[{label}] Transcript: {len(transcript)} chars")
         except Exception as exc:
-            print(f"[{label}] ⚠ Gemini transcription failed: {exc}")
+            print(f"[{label}] Gemini transcription failed: {exc}")
             transcript = ""
 
-        # ── Step 4.5: Screenshots ───────────────────────────────────────
+        # ── Step 4.5: Screenshots (TwelveLabs — non-fatal) ─────────────
         print(f"\n[{label}] --- Step 4.5: Relevant timestamps + screenshots ---")
+        moments, screenshot_paths = [], []
         if PIPELINE_FAST_MODE:
-            moments, screenshot_paths = [], []
             print(f"[{label}] FAST_MODE: skipping timestamps + screenshots")
         else:
             try:
@@ -521,16 +508,15 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
                 screenshot_paths = _extract_relevant_screenshots(video_path, moments)
                 print(f"[{label}] Screenshots: {len(screenshot_paths)}")
             except Exception as exc:
-                print(f"[{label}] ⚠ Screenshots failed: {exc}")
-                moments, screenshot_paths = [], []
+                print(f"[{label}] Screenshots skipped (non-fatal): {exc}")
 
-        # ── Step 4.6: First-order spec ──────────────────────────────────
-        print(f"\n[{label}] --- Step 4.6: Extracting first-order spec ---")
+        # ── Step 4.6: First-order spec (Gemini) ────────────────────────
+        print(f"\n[{label}] --- Step 4.6: Extracting first-order spec (Gemini) ---")
         try:
-            spec = _extract_first_order_spec(indexed_asset.id, transcript, tl_transcript)
+            spec = _extract_first_order_spec(transcript, tl_transcript)
             print(f"[{label}] Spec summary: {spec.get('summary', '')[:80]}...")
         except Exception as exc:
-            print(f"[{label}] ⚠ Spec extraction failed: {exc}")
+            print(f"[{label}] Spec extraction failed: {exc}")
             spec = {
                 "summary":           "",
                 "search_query":      transcript,
@@ -547,82 +533,20 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
             print(f"[{label}] RAG resolved {len(resolved_files)} file(s)")
         except Exception as exc:
             import traceback
-            print(f"[{label}] ⚠ GraphRAG failed: {type(exc).__name__}: {exc}")
+            print(f"[{label}] GraphRAG failed: {type(exc).__name__}: {exc}")
             traceback.print_exc()
             rag_context, rag_context_text, resolved_files = {}, "(not available)", []
 
-        # ── Step 5: Generate Cursor instructions ────────────────────────
-        print(f"\n[{label}] --- Step 5: Generating Cursor instructions ---")
-        spec_json = json.dumps(spec, ensure_ascii=False, indent=2)
-        # Keep Step 5 prompt safely under TwelveLabs input limits.
-        rag_context_for_prompt = _truncate_text(rag_context_text, 2600)
-        transcript_for_prompt = _truncate_text(transcript, 2200)
-        tl_transcript_for_prompt = _truncate_text(tl_transcript, 900)
-        thumbnail_urls_for_prompt = "\n".join(thumbnail_urls[:5]) if thumbnail_urls else "(not available)"
-        screenshot_paths_for_prompt = "\n".join(screenshot_paths[:5]) if screenshot_paths else "(not available)"
+        # ── Step 5: Generate Cursor instructions (Gemini — single call) ─
+        print(f"\n[{label}] --- Step 5: Generating Cursor instructions (Gemini) ---")
+        instructions = _generate_cursor_instructions(
+            spec=spec,
+            transcript=transcript,
+            tl_transcript=tl_transcript,
+            rag_context_text=rag_context_text,
+            resolved_files=resolved_files,
+        )
 
-        core_rules = """Context: The product is Alims. It already has a ready UI/UX and modules (teacher/student/principal). 
-Do NOT describe existing baseline UI/UX.
-Extract only PM-requested changes.
-If something is visible but not requested, omit it.
-If uncertain/inferred, omit it.
-Use concise bullet points."""
-
-        shared_small = f"""FIRST-ORDER SPEC:
-{_truncate_text(spec_json, 2200)}
-
-GRAPHRAG CONTEXT:
-{_truncate_text(rag_context_for_prompt, 1600) or "(not available)"}
-
-TRANSCRIPT (Gemini):
-{_truncate_text(transcript_for_prompt, 1400) or "(no transcript available)"}"""
-
-        changes_prompt = f"""{core_rules}
-{shared_small}
-
-Task: Output ONLY section:
-## Requested changes
-- bullets only."""
-
-        files_prompt = f"""{core_rules}
-FIRST-ORDER SPEC:
-{_truncate_text(spec_json, 1600)}
-
-GRAPHRAG CONTEXT:
-{_truncate_text(rag_context_for_prompt, 2200) or "(not available)"}
-
-Task: Output ONLY section:
-## Likely existing files/components to inspect first
-- Use @filepath bullets only.
-- Max 8 bullets."""
-
-        constraints_prompt = f"""{core_rules}
-{shared_small}
-TwelveLabs transcript:
-{_truncate_text(tl_transcript_for_prompt, 700) or "(not available)"}
-
-Task: Output ONLY section:
-## Implementation constraints
-- bullets only, max 8."""
-
-        checklist_prompt = f"""{core_rules}
-FIRST-ORDER SPEC:
-{_truncate_text(spec_json, 1600)}
-
-Task: Output ONLY section:
-## Acceptance checklist
-- bullets only, max 8."""
-
-        changes_section = _analyze_stream_text(indexed_asset.id, changes_prompt, label, "requested_changes")
-        files_section = _analyze_stream_text(indexed_asset.id, files_prompt, label, "files")
-        constraints_section = _analyze_stream_text(indexed_asset.id, constraints_prompt, label, "constraints")
-        checklist_section = _analyze_stream_text(indexed_asset.id, checklist_prompt, label, "checklist")
-
-        instructions = "\n\n".join(
-            part.strip()
-            for part in [changes_section, files_section, constraints_section, checklist_section]
-            if part and part.strip()
-        ).strip()
         if not instructions:
             raise RuntimeError("Step 5 instruction generation produced empty output.")
 
@@ -630,7 +554,7 @@ Task: Output ONLY section:
             instructions += "\n\n## Files to open\n\n"
             instructions += "\n".join(f"@{p}" for p in resolved_files)
 
-        print(f"\n[{label}] ✅ Done.")
+        print(f"\n[{label}] Done.")
 
         return {
             "task_id":      task_id,
@@ -642,6 +566,6 @@ Task: Output ONLY section:
     finally:
         for p in {video_path, to_upload} - {None}:
             try:
-                os.unlink(p)  # type: ignore[arg-type]
+                os.unlink(p)
             except FileNotFoundError:
                 pass
