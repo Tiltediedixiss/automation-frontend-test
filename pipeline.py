@@ -7,6 +7,9 @@ Uses Gemini for both transcription AND video understanding (the PM shows
 UI screens in the recording). No TwelveLabs — eliminates the 5+ min
 indexing bottleneck while preserving visual analysis.
 
+Step 5 uses 4 parallel focused Gemini calls (changes, files, constraints,
+checklist) matching the original double-step extraction pattern.
+
 Expected wall time: ~1-2 minutes.
 """
 
@@ -14,11 +17,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +41,7 @@ MAX_UPLOAD_MB  = 200
 PIPELINE_FAST_MODE = os.getenv("PIPELINE_FAST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
 MAX_SCREENSHOTS = 5
 GEMINI_MODEL   = "gemini-2.5-flash"
+MAX_OUTPUT_TOKENS = 65536
 
 if not GOOGLE_API_KEY:
     raise RuntimeError("Missing GOOGLE_API_KEY in environment/.env")
@@ -46,6 +51,10 @@ if not INDEX_ARN:
 _s3     = boto3.client("s3", region_name=AWS_REGION)
 _gemini = genai.Client(api_key=GOOGLE_API_KEY.strip())
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _get_duration_seconds(path: str) -> float:
     out = subprocess.run(
@@ -98,6 +107,50 @@ def _compress_if_needed(path: str, max_mb: float = MAX_UPLOAD_MB) -> str:
         raise
 
 
+def _repair_json(text: str) -> dict:
+    text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        last_brace = text.rfind("}")
+        last_bracket = text.rfind("]")
+        cut = max(last_brace, last_bracket) + 1
+        if cut > 0:
+            truncated = text[:cut]
+            open_braces = truncated.count("{") - truncated.count("}")
+            open_brackets = truncated.count("[") - truncated.count("]")
+            truncated += "}" * max(0, open_braces) + "]" * max(0, open_brackets)
+            return json.loads(truncated)
+    except json.JSONDecodeError:
+        pass
+    timestamps = re.findall(r'"timestamp_sec"\s*:\s*([\d.]+)', text)
+    if timestamps:
+        return {"moments": [{"timestamp_sec": float(t), "reason": "extracted"} for t in timestamps]}
+    return {}
+
+
+def _gemini_text(prompt: str, temperature: float = 0.35, gemini_file: types.File | None = None) -> str:
+    contents: list[Any] = []
+    if gemini_file:
+        contents.append(gemini_file)
+    contents.append(prompt)
+    response = _gemini.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            temperature=temperature,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+        ),
+    )
+    return (response.text or "").strip()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Upload + Transcription
+# ---------------------------------------------------------------------------
+
 def _upload_video_to_gemini(video_path: str) -> types.File:
     print("  Uploading video to Gemini Files API...")
     uploaded = _gemini.files.upload(file=video_path)
@@ -136,6 +189,9 @@ def _transcribe_with_google(video_path: str) -> str:
                 ),
                 types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav"),
             ],
+            config=types.GenerateContentConfig(
+                max_output_tokens=MAX_OUTPUT_TOKENS,
+            ),
         )
         return (response.text or "").strip()
     finally:
@@ -145,12 +201,17 @@ def _transcribe_with_google(video_path: str) -> str:
             pass
 
 
+# ---------------------------------------------------------------------------
+# Phase 2: Spec + Moments (video understanding)
+# ---------------------------------------------------------------------------
+
 def _identify_relevant_moments(gemini_file: types.File, transcript: str) -> list[dict]:
-    response = _gemini.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[
-            gemini_file,
-            f"""You are analyzing a product feature-request screen recording for Alims.
+    for attempt in range(2):
+        response = _gemini.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                gemini_file,
+                f"""You are analyzing a product feature-request screen recording for Alims.
 The PM is showing UI screens and explaining what they want changed.
 
 TRANSCRIPT (ground truth for what PM said):
@@ -166,18 +227,21 @@ For each moment provide:
 - reason: what the PM is showing/pointing at
 - screen_description: describe what's visible on screen (UI elements, page, data shown)
 
-Return JSON object with key "moments" containing array of objects.""",
-        ],
-        config=types.GenerateContentConfig(
-            temperature=0,
-            max_output_tokens=1500,
-            response_mime_type="application/json",
-        ),
-    )
-    text = (response.text or "").strip()
-    text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    parsed = json.loads(text) if text else {}
-    return parsed.get("moments", [])
+Return JSON object with key "moments" containing array of objects.
+Keep string values short (under 100 chars) to avoid truncation.""",
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0,
+                max_output_tokens=MAX_OUTPUT_TOKENS,
+                response_mime_type="application/json",
+            ),
+        )
+        text = (response.text or "").strip()
+        parsed = _repair_json(text)
+        moments = parsed.get("moments", [])
+        if moments:
+            return moments
+    return []
 
 
 def _extract_screenshots(video_path: str, moments: list[dict]) -> list[str]:
@@ -228,14 +292,17 @@ Return JSON with keys: summary, search_query, requested_changes (string[]), affe
         ],
         config=types.GenerateContentConfig(
             temperature=0.3,
-            max_output_tokens=4096,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
             response_mime_type="application/json",
         ),
     )
     text = (response.text or "").strip()
-    text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    return json.loads(text) if text else {}
+    return _repair_json(text) if text else {}
 
+
+# ---------------------------------------------------------------------------
+# GraphRAG
+# ---------------------------------------------------------------------------
 
 def _retrieve_rag_context(spec: dict) -> dict:
     if not GRAPHRAG_DOCS.exists():
@@ -335,65 +402,140 @@ def _extract_file_paths(rag_context: dict) -> list[str]:
     return paths
 
 
-def _generate_cursor_instructions(
-    spec: dict,
-    transcript: str,
-    rag_context_text: str,
-    resolved_files: list[str],
-    moments: list[dict],
-) -> str:
-    spec_json = json.dumps(spec, ensure_ascii=False, indent=2)
-    moments_text = json.dumps(moments, ensure_ascii=False, indent=2) if moments else "(none)"
+# ---------------------------------------------------------------------------
+# Step 5: Cursor instructions — 4 parallel focused calls (original pattern)
+# ---------------------------------------------------------------------------
 
-    prompt = f"""You are generating detailed Cursor IDE instructions for a developer implementing PM-requested changes to Alims.
-
-Context: The product is Alims. It already has a ready UI/UX and modules (teacher/student/principal).
+CORE_RULES = """Context: The product is Alims. It already has a ready UI/UX and modules (teacher/student/principal).
 Do NOT describe existing baseline UI/UX.
 Extract only PM-requested changes.
 If something is visible but not requested, omit it.
 If uncertain/inferred, omit it.
+Use concise bullet points."""
 
-FIRST-ORDER SPEC (extracted from video + transcript):
+
+def _generate_changes_section(
+    gemini_file: types.File,
+    spec_json: str,
+    rag_context_text: str,
+    transcript: str,
+    moments_text: str,
+) -> str:
+    prompt = f"""{CORE_RULES}
+
+FIRST-ORDER SPEC:
 {spec_json}
+
+GRAPHRAG CONTEXT (existing codebase — what is already implemented):
+{rag_context_text or "(not available)"}
+
+TRANSCRIPT (Gemini):
+{transcript or "(no transcript available)"}
 
 VISUAL MOMENTS (what the PM showed on screen):
 {moments_text}
 
-GRAPHRAG CONTEXT (codebase structure):
-{rag_context_text or "(not available)"}
+Watch the video again. Use both what you SEE on screen and the codebase context from GraphRAG to produce accurate, detailed instructions.
 
-TRANSCRIPT:
-{transcript or "(no transcript available)"}
+Task: Output ONLY section:
+## Requested changes
+- Every distinct change the PM requested, one bullet per change. Include visual context from what PM showed on screen.
+- Reference existing components from GRAPHRAG CONTEXT when the change modifies them.
+- Do not merge unrelated changes into one bullet.
+- Be exhaustive — do not omit any requested change."""
+    return _gemini_text(prompt, gemini_file=gemini_file)
+
+
+def _generate_files_section(
+    gemini_file: types.File,
+    spec_json: str,
+    rag_context_text: str,
+    resolved_files: list[str],
+) -> str:
+    prompt = f"""{CORE_RULES}
+
+FIRST-ORDER SPEC:
+{spec_json}
+
+GRAPHRAG CONTEXT (existing codebase — what is already implemented):
+{rag_context_text or "(not available)"}
 
 RESOLVED FILES FROM RAG:
 {json.dumps(resolved_files) if resolved_files else "(none)"}
 
-Generate a complete Cursor prompt with these sections. Use concise bullet points:
+Watch the video again. Match the screens the PM navigated to the existing codebase components from GraphRAG.
 
-## Requested changes
-- Every distinct change the PM requested, one bullet per change. Include visual context from what PM showed.
-
+Task: Output ONLY section:
 ## Likely existing files/components to inspect first
-- @filepath format, max 8 bullets. Use the resolved files from RAG plus any you infer from context.
+- Use @filepath bullets only.
+- Include all resolved files from RAG.
+- Add any additional files you can infer from the video screens, spec and codebase context.
+- Max 12 bullets."""
+    return _gemini_text(prompt, gemini_file=gemini_file)
 
+
+def _generate_constraints_section(
+    gemini_file: types.File,
+    spec_json: str,
+    rag_context_text: str,
+    transcript: str,
+    moments_text: str,
+) -> str:
+    prompt = f"""{CORE_RULES}
+
+FIRST-ORDER SPEC:
+{spec_json}
+
+GRAPHRAG CONTEXT (existing codebase — what is already implemented):
+{rag_context_text or "(not available)"}
+
+TRANSCRIPT (Gemini):
+{transcript or "(no transcript available)"}
+
+VISUAL MOMENTS:
+{moments_text}
+
+Watch the video again. Identify constraints by comparing what the PM showed on screen with what already exists in the codebase (GraphRAG context).
+
+Task: Output ONLY section:
 ## Implementation constraints
-- Technical constraints, edge cases, things to watch out for. Max 8 bullets.
+- Technical constraints, edge cases, things to watch out for.
+- Note where existing component patterns (from GraphRAG) must be followed.
+- Include details from what the PM showed visually on screen.
+- Max 10 bullets."""
+    return _gemini_text(prompt, gemini_file=gemini_file)
 
+
+def _generate_checklist_section(
+    gemini_file: types.File,
+    spec_json: str,
+    transcript: str,
+    moments_text: str,
+) -> str:
+    prompt = f"""{CORE_RULES}
+
+FIRST-ORDER SPEC:
+{spec_json}
+
+TRANSCRIPT:
+{transcript or "(no transcript available)"}
+
+VISUAL MOMENTS:
+{moments_text}
+
+Watch the video again. Base each checklist item on what the PM actually showed and said.
+
+Task: Output ONLY section:
 ## Acceptance checklist
-- How to verify each change works. Max 8 bullets.
+- How to verify each change works.
+- Reference specific UI states / screens / behaviors the PM demonstrated on screen.
+- Max 10 bullets."""
+    return _gemini_text(prompt, gemini_file=gemini_file)
 
-Output ONLY the markdown sections above, nothing else."""
 
-    response = _gemini.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-            max_output_tokens=4096,
-        ),
-    )
-    return (response.text or "").strip()
-
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
     label = task_id or s3_key
@@ -470,18 +612,56 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
             traceback.print_exc()
             rag_context, rag_context_text, resolved_files = {}, "(not available)", []
 
-        # ── Phase 4: Cursor instructions (single Gemini call) ───────────
-        print(f"\n[{label}] --- Phase 4: Generating Cursor instructions ---")
-        instructions = _generate_cursor_instructions(
-            spec=spec,
-            transcript=transcript,
-            rag_context_text=rag_context_text,
-            resolved_files=resolved_files,
-            moments=moments,
-        )
+        # ── Phase 4: Cursor instructions — 4 focused parallel calls ─────
+        print(f"\n[{label}] --- Phase 4: Generating Cursor instructions (4 parallel sections) ---")
+        spec_json = json.dumps(spec, ensure_ascii=False, indent=2)
+        moments_text = json.dumps(moments, ensure_ascii=False, indent=2) if moments else "(none)"
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            fut_changes = pool.submit(
+                _generate_changes_section,
+                gemini_file, spec_json, rag_context_text, transcript, moments_text,
+            )
+            fut_files = pool.submit(
+                _generate_files_section,
+                gemini_file, spec_json, rag_context_text, resolved_files,
+            )
+            fut_constraints = pool.submit(
+                _generate_constraints_section,
+                gemini_file, spec_json, rag_context_text, transcript, moments_text,
+            )
+            fut_checklist = pool.submit(
+                _generate_checklist_section,
+                gemini_file, spec_json, transcript, moments_text,
+            )
+
+            sections: dict[str, str] = {}
+            for name, fut in [
+                ("changes", fut_changes),
+                ("files", fut_files),
+                ("constraints", fut_constraints),
+                ("checklist", fut_checklist),
+            ]:
+                try:
+                    sections[name] = fut.result()
+                    print(f"[{label}] Section '{name}': {len(sections[name])} chars")
+                except Exception as exc:
+                    print(f"[{label}] Section '{name}' failed: {exc}")
+                    sections[name] = ""
+
+        instructions = "\n\n".join(
+            part.strip()
+            for part in [
+                sections.get("changes", ""),
+                sections.get("files", ""),
+                sections.get("constraints", ""),
+                sections.get("checklist", ""),
+            ]
+            if part and part.strip()
+        ).strip()
 
         if not instructions:
-            raise RuntimeError("Instruction generation produced empty output.")
+            raise RuntimeError("Step 5 instruction generation produced empty output.")
 
         if resolved_files:
             instructions += "\n\n## Files to open\n\n"
