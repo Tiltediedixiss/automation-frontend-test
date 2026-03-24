@@ -3,9 +3,11 @@ pipeline.py
 -----------
 Core pipeline: S3 key in → result dict out.
 
-TwelveLabs is used ONLY for video indexing and visual moment identification.
-All text-based analysis (spec extraction, instruction generation) uses Gemini
-to avoid burning through TwelveLabs' 50 req/day rate limit.
+Uses Gemini for both transcription AND video understanding (the PM shows
+UI screens in the recording). No TwelveLabs — eliminates the 5+ min
+indexing bottleneck while preserving visual analysis.
+
+Expected wall time: ~1-2 minutes.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -23,29 +26,24 @@ import boto3
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from twelvelabs import ResponseFormat, TwelveLabs
 
 load_dotenv()
 
-TWELVELABS_KEY    = os.getenv("TWELVELABS_API_KEY", "").strip().strip("\"'")
-GOOGLE_API_KEY    = os.getenv("GOOGLE_API_KEY", "").strip().strip("\"'")
-INDEX_ARN         = os.getenv("AWS_S3_VECTOR_INDEX_ARN", "").strip().strip("\"'")
-AWS_REGION        = os.getenv("AWS_REGION", "eu-central-1")
-GRAPHRAG_DOCS     = Path(__file__).resolve().parent / "generated" / "graphrag-documents.json"
-INDEX_NAME_PREFIX = "cursor-feature-requests"
-MAX_UPLOAD_MB     = 200
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip().strip("\"'")
+INDEX_ARN      = os.getenv("AWS_S3_VECTOR_INDEX_ARN", "").strip().strip("\"'")
+AWS_REGION     = os.getenv("AWS_REGION", "eu-central-1")
+GRAPHRAG_DOCS  = Path(__file__).resolve().parent / "generated" / "graphrag-documents.json"
+MAX_UPLOAD_MB  = 200
 PIPELINE_FAST_MODE = os.getenv("PIPELINE_FAST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
-INDEX_POLL_SECONDS = 2 if PIPELINE_FAST_MODE else 5
+MAX_SCREENSHOTS = 5
+GEMINI_MODEL   = "gemini-2.5-flash"
 
-if not TWELVELABS_KEY:
-    raise RuntimeError("Missing TWELVELABS_API_KEY in environment/.env")
 if not GOOGLE_API_KEY:
     raise RuntimeError("Missing GOOGLE_API_KEY in environment/.env")
 if not INDEX_ARN:
     raise RuntimeError("Missing AWS_S3_VECTOR_INDEX_ARN in environment/.env")
 
 _s3     = boto3.client("s3", region_name=AWS_REGION)
-client  = TwelveLabs(api_key=TWELVELABS_KEY)
 _gemini = genai.Client(api_key=GOOGLE_API_KEY.strip())
 
 
@@ -100,6 +98,18 @@ def _compress_if_needed(path: str, max_mb: float = MAX_UPLOAD_MB) -> str:
         raise
 
 
+def _upload_video_to_gemini(video_path: str) -> types.File:
+    print("  Uploading video to Gemini Files API...")
+    uploaded = _gemini.files.upload(file=video_path)
+    while uploaded.state.name == "PROCESSING":
+        time.sleep(2)
+        uploaded = _gemini.files.get(name=uploaded.name)
+    if uploaded.state.name == "FAILED":
+        raise RuntimeError(f"Gemini file upload failed: {uploaded.state}")
+    print(f"  Gemini file ready: {uploaded.name}")
+    return uploaded
+
+
 def _transcribe_with_google(video_path: str) -> str:
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         wav_path = f.name
@@ -115,7 +125,7 @@ def _transcribe_with_google(video_path: str) -> str:
         audio_bytes = Path(wav_path).read_bytes()
         print("  Transcribing with Gemini...")
         response = _gemini.models.generate_content(
-            model="gemini-2.5-flash",
+            model=GEMINI_MODEL,
             contents=[
                 (
                     "Transcribe this audio verbatim. "
@@ -135,88 +145,42 @@ def _transcribe_with_google(video_path: str) -> str:
             pass
 
 
-def _create_fresh_index():
-    index_name = f"{INDEX_NAME_PREFIX}-{int(time.time())}"
-    print(f"--- Step 1: Creating fresh index: {index_name} ---")
-    index = client.indexes.create(
-        index_name=index_name,
-        models=[
-            {"model_name": "marengo3.0", "model_options": ["visual", "audio"]},
-            {"model_name": "pegasus1.2", "model_options": ["visual", "audio"]},
-        ],
-        addons=["thumbnail"],
-    )
-    print(f"  Index created: {index.id}")
-    return index
+def _identify_relevant_moments(gemini_file: types.File, transcript: str) -> list[dict]:
+    response = _gemini.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=[
+            gemini_file,
+            f"""You are analyzing a product feature-request screen recording for Alims.
+The PM is showing UI screens and explaining what they want changed.
 
-
-def _fetch_twelvelabs_artifacts(index_id: str, indexed_asset_id: str):
-    details = client.indexes.indexed_assets.retrieve(
-        index_id, indexed_asset_id, transcription=True,
-    )
-    tl_transcript = ""
-    if details.transcription:
-        tl_transcript = " ".join(
-            item.value.strip()
-            for item in details.transcription
-            if item.value and item.value.strip()
-        ).strip()
-
-    thumbnail_urls: list[str] = []
-    if details.hls and details.hls.thumbnail_urls:
-        thumbnail_urls = list(details.hls.thumbnail_urls)
-
-    return tl_transcript, thumbnail_urls
-
-
-def _identify_relevant_moments(video_id: str, transcript: str) -> list[dict]:
-    response = client.analyze(
-        video_id=video_id,
-        prompt=f"""You are analyzing a product feature-request video for Alims.
-
-Goal: identify only the moments that are relevant to the PM's requested change.
-
-The transcript below is the primary source of truth:
+TRANSCRIPT (ground truth for what PM said):
 ---
 {transcript or "(no transcript available)"}
 ---
 
-Return 1 to 5 key moments where the requested change is visually relevant on screen.
-Only include moments that help developers understand the requested change.
-Do not include generic dashboards or unrelated screens unless they are necessary context.
-For each moment, provide:
-- timestamp_sec: the best second in the video to capture a screenshot
-- reason: short explanation of why this frame is useful
-""",
-        temperature=0,
-        response_format=ResponseFormat(
-            type="json_schema",
-            json_schema={
-                "type": "object",
-                "properties": {
-                    "moments": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "timestamp_sec": {"type": "number"},
-                                "reason":        {"type": "string"},
-                            },
-                            "required": ["timestamp_sec", "reason"],
-                        },
-                        "minItems": 1,
-                    }
-                },
-                "required": ["moments"],
-            },
+Watch the video carefully. Identify 1 to 5 key moments where the PM is showing
+a screen or UI element relevant to their requested change.
+
+For each moment provide:
+- timestamp_sec: the second in the video to capture a screenshot
+- reason: what the PM is showing/pointing at
+- screen_description: describe what's visible on screen (UI elements, page, data shown)
+
+Return JSON object with key "moments" containing array of objects.""",
+        ],
+        config=types.GenerateContentConfig(
+            temperature=0,
+            max_output_tokens=1500,
+            response_mime_type="application/json",
         ),
-        max_tokens=600,
     )
-    raw = response.data or '{"moments":[]}'
-    return json.loads(raw).get("moments") or []
+    text = (response.text or "").strip()
+    text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    parsed = json.loads(text) if text else {}
+    return parsed.get("moments", [])
 
 
-def _extract_relevant_screenshots(video_path: str, moments: list[dict]) -> list[str]:
+def _extract_screenshots(video_path: str, moments: list[dict]) -> list[str]:
     out_dir = Path(tempfile.mkdtemp())
     paths: list[str] = []
     for idx, moment in enumerate(moments, start=1):
@@ -232,13 +196,39 @@ def _extract_relevant_screenshots(video_path: str, moments: list[dict]) -> list[
     return paths
 
 
-def _gemini_json(prompt: str, max_tokens: int = 4096) -> dict:
+def _extract_first_order_spec(gemini_file: types.File, transcript: str) -> dict:
     response = _gemini.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
+        model=GEMINI_MODEL,
+        contents=[
+            gemini_file,
+            f"""You are extracting a complete implementation spec from a product feature-request video for Alims.
+
+Alims has three existing modules: teacher, student, principal. Do NOT re-describe their baseline behavior.
+However, if the PM is requesting a change, fix, or addition TO any existing module, screen, or component — include it.
+
+Your goal is HIGH RECALL. It is better to include something borderline than to miss a real request.
+
+TRANSCRIPT — treat this as ground truth for what the PM said:
+---
+{transcript or "(no transcript available)"}
+---
+
+Watch the video carefully. The PM is showing screens and pointing at UI elements.
+Combine what you SEE on screen with what the PM SAYS to extract:
+
+- summary: A complete paragraph describing everything the PM wants changed or added. Include visual context from what they showed on screen. Do not shorten.
+- search_query: A dense retrieval query covering all topics mentioned (components, routes, behaviors).
+- requested_changes: Every distinct change, fix, or new behavior the PM requested — one item per action. Include details from what was visible on screen. Do not merge unrelated changes. Do not omit any.
+- affected_surfaces: Every route, screen, component, or module the PM mentions or shows on screen.
+- visual_context: Describe what the PM showed on screen that adds context beyond the transcript (UI state, data visible, navigation path taken).
+
+Do not invent requirements. Do not omit requirements the PM stated or demonstrated visually.
+
+Return JSON with keys: summary, search_query, requested_changes (string[]), affected_surfaces (string[]), visual_context (string).""",
+        ],
         config=types.GenerateContentConfig(
             temperature=0.3,
-            max_output_tokens=max_tokens,
+            max_output_tokens=4096,
             response_mime_type="application/json",
         ),
     )
@@ -247,42 +237,11 @@ def _gemini_json(prompt: str, max_tokens: int = 4096) -> dict:
     return json.loads(text) if text else {}
 
 
-def _extract_first_order_spec(transcript: str, tl_transcript: str) -> dict:
-    prompt = f"""You are extracting a complete implementation spec from a product feature-request video for Alims.
-
-Alims has three existing modules: teacher, student, principal. Do NOT re-describe their baseline behavior.
-However, if the PM is requesting a change, fix, or addition TO any existing module, screen, or component — include it. Modifications to existing surfaces are in scope.
-
-Your goal is HIGH RECALL. It is better to include something borderline than to miss a real request.
-
-PRIMARY TRANSCRIPT — treat this as ground truth for what the PM said:
----
-{transcript or "(no transcript available)"}
----
-
-SECONDARY TRANSCRIPT from Twelve Labs — use only for screen/UI disambiguation:
----
-{tl_transcript or "(not available)"}
----
-
-Extract the following and be exhaustive:
-
-- summary: A complete paragraph describing everything the PM wants changed or added. Do not shorten.
-- search_query: A dense retrieval query covering all topics mentioned (components, routes, behaviors).
-- requested_changes: Every distinct change, fix, or new behavior the PM requested — one item per action. Do not merge unrelated changes into one bullet. Do not omit any.
-- affected_surfaces: Every route, screen, component, or module the PM mentions or that is clearly shown while they are describing a change.
-
-Do not invent requirements. Do not omit requirements the PM stated.
-
-Respond with a JSON object with keys: summary, search_query, requested_changes (array of strings), affected_surfaces (array of strings)."""
-    return _gemini_json(prompt, max_tokens=4096)
-
-
 def _retrieve_rag_context(spec: dict) -> dict:
     if not GRAPHRAG_DOCS.exists():
         raise FileNotFoundError(
-            f"GraphRAG documents file not found: {GRAPHRAG_DOCS} (resolved from {Path(__file__).resolve()}). "
-            "Ensure generated/graphrag-documents.json exists and is included in the Docker image."
+            f"GraphRAG documents file not found: {GRAPHRAG_DOCS}. "
+            "Ensure generated/graphrag-documents.json exists."
         )
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from query_rag import GraphRAGRetriever, infer_region
@@ -379,11 +338,12 @@ def _extract_file_paths(rag_context: dict) -> list[str]:
 def _generate_cursor_instructions(
     spec: dict,
     transcript: str,
-    tl_transcript: str,
     rag_context_text: str,
     resolved_files: list[str],
+    moments: list[dict],
 ) -> str:
     spec_json = json.dumps(spec, ensure_ascii=False, indent=2)
+    moments_text = json.dumps(moments, ensure_ascii=False, indent=2) if moments else "(none)"
 
     prompt = f"""You are generating detailed Cursor IDE instructions for a developer implementing PM-requested changes to Alims.
 
@@ -393,17 +353,17 @@ Extract only PM-requested changes.
 If something is visible but not requested, omit it.
 If uncertain/inferred, omit it.
 
-FIRST-ORDER SPEC:
+FIRST-ORDER SPEC (extracted from video + transcript):
 {spec_json}
+
+VISUAL MOMENTS (what the PM showed on screen):
+{moments_text}
 
 GRAPHRAG CONTEXT (codebase structure):
 {rag_context_text or "(not available)"}
 
-TRANSCRIPT (Gemini):
+TRANSCRIPT:
 {transcript or "(no transcript available)"}
-
-TWELVELABS TRANSCRIPT:
-{tl_transcript or "(not available)"}
 
 RESOLVED FILES FROM RAG:
 {json.dumps(resolved_files) if resolved_files else "(none)"}
@@ -411,7 +371,7 @@ RESOLVED FILES FROM RAG:
 Generate a complete Cursor prompt with these sections. Use concise bullet points:
 
 ## Requested changes
-- Every distinct change the PM requested, one bullet per change.
+- Every distinct change the PM requested, one bullet per change. Include visual context from what PM showed.
 
 ## Likely existing files/components to inspect first
 - @filepath format, max 8 bullets. Use the resolved files from RAG plus any you infer from context.
@@ -425,7 +385,7 @@ Generate a complete Cursor prompt with these sections. Use concise bullet points
 Output ONLY the markdown sections above, nothing else."""
 
     response = _gemini.models.generate_content(
-        model="gemini-2.5-flash",
+        model=GEMINI_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.3,
@@ -439,6 +399,7 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
     label = task_id or s3_key
     video_path: str | None = None
     to_upload:  str | None = None
+    gemini_file: types.File | None = None
 
     try:
         print(f"[{label}] Downloading s3://{s3_bucket}/{s3_key}")
@@ -449,83 +410,55 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
         print(f"[{label}] Downloaded: {size_mb:.1f} MB")
 
         to_upload = _compress_if_needed(video_path)
+        final_video = to_upload
 
-        # ── Step 1: Create TwelveLabs index ────────────────────────────
-        index = _create_fresh_index()
+        # ── Phase 1: Upload to Gemini + transcribe (parallel) ───────────
+        print(f"\n[{label}] --- Phase 1: Gemini upload + transcription (parallel) ---")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_upload     = pool.submit(_upload_video_to_gemini, final_video)
+            fut_transcript = pool.submit(_transcribe_with_google, final_video)
 
-        # ── Step 2: Upload as asset ─────────────────────────────────────
-        print(f"[{label}] Uploading to TwelveLabs...")
-        with open(to_upload, "rb") as f:
-            asset = client.assets.create(method="direct", file=f)
-        print(f"[{label}] Asset: {asset.id}")
-
-        if to_upload != video_path:
-            try:
-                os.unlink(to_upload)
-                to_upload = None
-            except FileNotFoundError:
-                pass
-
-        # ── Step 3: Index ───────────────────────────────────────────────
-        indexed_asset = client.indexes.indexed_assets.create(
-            index_id=index.id, asset_id=asset.id, enable_video_stream=True,
-        )
-        print(f"[{label}] Indexing (indexed_asset_id={indexed_asset.id})...")
-        while True:
-            indexed_asset = client.indexes.indexed_assets.retrieve(index.id, indexed_asset.id)
-            print(f"[{label}]   status: {indexed_asset.status}")
-            if indexed_asset.status == "ready":
-                break
-            if indexed_asset.status == "failed":
-                raise RuntimeError("TwelveLabs indexing failed.")
-            time.sleep(INDEX_POLL_SECONDS)
-
-        # ── Step 3.5: TwelveLabs artifacts ──────────────────────────────
-        if PIPELINE_FAST_MODE:
-            tl_transcript, thumbnail_urls = "", []
-            print(f"[{label}] FAST_MODE: skipping TwelveLabs artifacts fetch")
-        else:
-            tl_transcript, thumbnail_urls = _fetch_twelvelabs_artifacts(index.id, indexed_asset.id)
-            print(f"[{label}] TL transcript: {len(tl_transcript)} chars, thumbnails: {len(thumbnail_urls)}")
-
-        # ── Step 4: Gemini transcription ────────────────────────────────
-        print(f"\n[{label}] --- Step 4: Transcribing with Google Gemini ---")
-        try:
-            transcript = _transcribe_with_google(video_path)
+            gemini_file = fut_upload.result()
+            transcript  = fut_transcript.result()
             print(f"[{label}] Transcript: {len(transcript)} chars")
-        except Exception as exc:
-            print(f"[{label}] Gemini transcription failed: {exc}")
-            transcript = ""
 
-        # ── Step 4.5: Screenshots (TwelveLabs — non-fatal) ─────────────
-        print(f"\n[{label}] --- Step 4.5: Relevant timestamps + screenshots ---")
-        moments, screenshot_paths = [], []
-        if PIPELINE_FAST_MODE:
-            print(f"[{label}] FAST_MODE: skipping timestamps + screenshots")
-        else:
+        # ── Phase 2: Spec + moments (parallel, both use gemini video) ───
+        print(f"\n[{label}] --- Phase 2: Spec + moments extraction (parallel) ---")
+        moments: list[dict] = []
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_spec = pool.submit(_extract_first_order_spec, gemini_file, transcript)
+            fut_moments = None
+            if not PIPELINE_FAST_MODE:
+                fut_moments = pool.submit(_identify_relevant_moments, gemini_file, transcript)
+
             try:
-                moments          = _identify_relevant_moments(indexed_asset.id, transcript)
-                screenshot_paths = _extract_relevant_screenshots(video_path, moments)
-                print(f"[{label}] Screenshots: {len(screenshot_paths)}")
+                spec = fut_spec.result()
+                print(f"[{label}] Spec summary: {spec.get('summary', '')[:80]}...")
             except Exception as exc:
-                print(f"[{label}] Screenshots skipped (non-fatal): {exc}")
+                print(f"[{label}] Spec extraction failed: {exc}")
+                spec = {
+                    "summary": "",
+                    "search_query": transcript,
+                    "requested_changes": [transcript] if transcript else [],
+                    "affected_surfaces": [],
+                }
 
-        # ── Step 4.6: First-order spec (Gemini) ────────────────────────
-        print(f"\n[{label}] --- Step 4.6: Extracting first-order spec (Gemini) ---")
-        try:
-            spec = _extract_first_order_spec(transcript, tl_transcript)
-            print(f"[{label}] Spec summary: {spec.get('summary', '')[:80]}...")
-        except Exception as exc:
-            print(f"[{label}] Spec extraction failed: {exc}")
-            spec = {
-                "summary":           "",
-                "search_query":      transcript,
-                "requested_changes": [transcript] if transcript else [],
-                "affected_surfaces": [],
-            }
+            if fut_moments:
+                try:
+                    moments = fut_moments.result()
+                    print(f"[{label}] Moments: {len(moments)}")
+                except Exception as exc:
+                    print(f"[{label}] Moments failed (non-fatal): {exc}")
 
-        # ── Step 4.7: GraphRAG ──────────────────────────────────────────
-        print(f"\n[{label}] --- Step 4.7: Querying GraphRAG ---")
+        # ── Screenshots ─────────────────────────────────────────────────
+        screenshot_paths: list[str] = []
+        if moments:
+            print(f"\n[{label}] --- Extracting screenshots ---")
+            screenshot_paths = _extract_screenshots(final_video, moments)
+            print(f"[{label}] Screenshots: {len(screenshot_paths)}")
+
+        # ── Phase 3: GraphRAG ───────────────────────────────────────────
+        print(f"\n[{label}] --- Phase 3: Querying GraphRAG ---")
         try:
             rag_context      = _retrieve_rag_context(spec)
             rag_context_text = _format_rag_context(rag_context)
@@ -537,18 +470,18 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
             traceback.print_exc()
             rag_context, rag_context_text, resolved_files = {}, "(not available)", []
 
-        # ── Step 5: Generate Cursor instructions (Gemini — single call) ─
-        print(f"\n[{label}] --- Step 5: Generating Cursor instructions (Gemini) ---")
+        # ── Phase 4: Cursor instructions (single Gemini call) ───────────
+        print(f"\n[{label}] --- Phase 4: Generating Cursor instructions ---")
         instructions = _generate_cursor_instructions(
             spec=spec,
             transcript=transcript,
-            tl_transcript=tl_transcript,
             rag_context_text=rag_context_text,
             resolved_files=resolved_files,
+            moments=moments,
         )
 
         if not instructions:
-            raise RuntimeError("Step 5 instruction generation produced empty output.")
+            raise RuntimeError("Instruction generation produced empty output.")
 
         if resolved_files:
             instructions += "\n\n## Files to open\n\n"
@@ -564,6 +497,11 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
         }
 
     finally:
+        if gemini_file:
+            try:
+                _gemini.files.delete(name=gemini_file.name)
+            except Exception:
+                pass
         for p in {video_path, to_upload} - {None}:
             try:
                 os.unlink(p)
