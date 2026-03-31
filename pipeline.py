@@ -182,8 +182,8 @@ def _transcribe_with_google(video_path: str) -> str:
             contents=[
                 (
                     "Transcribe this audio verbatim. "
-                    "The spoken language is Russian. "
-                    "Return the transcript only in Russian Cyrillic. "
+                    "The spoken language is English. "
+                    "Return the transcript in English. "
                     "Do not translate. Do not summarize. Do not infer missing content. "
                     "Preserve wording as spoken as closely as possible."
                 ),
@@ -280,11 +280,11 @@ TRANSCRIPT — treat this as ground truth for what the PM said:
 Watch the video carefully. The PM is showing screens and pointing at UI elements.
 Combine what you SEE on screen with what the PM SAYS to extract:
 
-- summary: A complete paragraph describing everything the PM wants changed or added. Include visual context from what they showed on screen. Do not shorten.
+- summary: 2-3 sentences MAX. High-level overview of the feature scope — what module, what the PM wants. Do NOT list every individual change here. This is just an executive summary for a developer to quickly understand the scope.
 - search_query: A dense retrieval query covering all topics mentioned (components, routes, behaviors).
-- requested_changes: Every distinct change, fix, or new behavior the PM requested — one item per action. Include details from what was visible on screen. Do not merge unrelated changes. Do not omit any.
+- requested_changes: Every distinct change, fix, or new behavior the PM requested — one item per action. Be specific and actionable. Do NOT include timestamps or video references. Do not merge unrelated changes. Do not omit any.
 - affected_surfaces: Every route, screen, component, or module the PM mentions or shows on screen.
-- visual_context: Describe what the PM showed on screen that adds context beyond the transcript (UI state, data visible, navigation path taken).
+- visual_context: Describe what the PM showed on screen that adds context beyond the transcript (UI state, data visible, navigation path taken). Do NOT repeat the requested_changes here.
 
 Do not invent requirements. Do not omit requirements the PM stated or demonstrated visually.
 
@@ -419,7 +419,6 @@ def _generate_changes_section(
     spec_json: str,
     rag_context_text: str,
     transcript: str,
-    moments_text: str,
 ) -> str:
     prompt = f"""{CORE_RULES}
 
@@ -432,45 +431,19 @@ GRAPHRAG CONTEXT (existing codebase — what is already implemented):
 TRANSCRIPT (Gemini):
 {transcript or "(no transcript available)"}
 
-VISUAL MOMENTS (what the PM showed on screen):
-{moments_text}
-
-Watch the video again. Use both what you SEE on screen and the codebase context from GraphRAG to produce accurate, detailed instructions.
+Watch the video again. Use both what you SEE on screen and the codebase context from GraphRAG.
 
 Task: Output ONLY section:
 ## Requested changes
-- Every distinct change the PM requested, one bullet per change. Include visual context from what PM showed on screen.
-- Reference existing components from GRAPHRAG CONTEXT when the change modifies them.
-- Do not merge unrelated changes into one bullet.
+
+STRICT RULES:
+- One bullet per distinct change. Be specific and actionable — a developer should know exactly what to build.
+- Reference existing components from GRAPHRAG CONTEXT when the change modifies them (e.g. "In QuestionFeedback component, add...").
+- Do NOT include timestamps (no "at 0:59", no "shown at 1:10").
+- Do NOT include "(Visual: ...)" annotations.
+- Do NOT describe what the PM showed — describe what the developer needs to IMPLEMENT.
+- Do NOT repeat or rephrase the summary. Each bullet is a concrete implementation task.
 - Be exhaustive — do not omit any requested change."""
-    return _gemini_text(prompt, gemini_file=gemini_file)
-
-
-def _generate_files_section(
-    gemini_file: types.File,
-    spec_json: str,
-    rag_context_text: str,
-    resolved_files: list[str],
-) -> str:
-    prompt = f"""{CORE_RULES}
-
-FIRST-ORDER SPEC:
-{spec_json}
-
-GRAPHRAG CONTEXT (existing codebase — what is already implemented):
-{rag_context_text or "(not available)"}
-
-RESOLVED FILES FROM RAG:
-{json.dumps(resolved_files) if resolved_files else "(none)"}
-
-Watch the video again. Match the screens the PM navigated to the existing codebase components from GraphRAG.
-
-Task: Output ONLY section:
-## Likely existing files/components to inspect first
-- Use @filepath bullets only.
-- Include all resolved files from RAG.
-- Add any additional files you can infer from the video screens, spec and codebase context.
-- Max 12 bullets."""
     return _gemini_text(prompt, gemini_file=gemini_file)
 
 
@@ -479,7 +452,6 @@ def _generate_constraints_section(
     spec_json: str,
     rag_context_text: str,
     transcript: str,
-    moments_text: str,
 ) -> str:
     prompt = f"""{CORE_RULES}
 
@@ -492,16 +464,16 @@ GRAPHRAG CONTEXT (existing codebase — what is already implemented):
 TRANSCRIPT (Gemini):
 {transcript or "(no transcript available)"}
 
-VISUAL MOMENTS:
-{moments_text}
-
-Watch the video again. Identify constraints by comparing what the PM showed on screen with what already exists in the codebase (GraphRAG context).
+Watch the video again. Identify constraints by comparing what the PM showed on screen with what already exists in the codebase.
 
 Task: Output ONLY section:
 ## Implementation constraints
-- Technical constraints, edge cases, things to watch out for.
-- Note where existing component patterns (from GraphRAG) must be followed.
-- Include details from what the PM showed visually on screen.
+
+STRICT RULES:
+- Only technical constraints, edge cases, gotchas, patterns to follow, and things that could go wrong.
+- Reference specific existing components/patterns from GraphRAG that must be reused or followed.
+- Do NOT repeat the requested changes — the developer already has those. This section is about HOW to implement, not WHAT to implement.
+- Do NOT include timestamps or video references.
 - Max 10 bullets."""
     return _gemini_text(prompt, gemini_file=gemini_file)
 
@@ -510,7 +482,6 @@ def _generate_checklist_section(
     gemini_file: types.File,
     spec_json: str,
     transcript: str,
-    moments_text: str,
 ) -> str:
     prompt = f"""{CORE_RULES}
 
@@ -520,15 +491,17 @@ FIRST-ORDER SPEC:
 TRANSCRIPT:
 {transcript or "(no transcript available)"}
 
-VISUAL MOMENTS:
-{moments_text}
-
-Watch the video again. Base each checklist item on what the PM actually showed and said.
+Watch the video again. Base each checklist item on what the PM demonstrated.
 
 Task: Output ONLY section:
 ## Acceptance checklist
-- How to verify each change works.
-- Reference specific UI states / screens / behaviors the PM demonstrated on screen.
+
+STRICT RULES:
+- Each bullet is a testable verification step: "Navigate to X, do Y, verify Z happens."
+- Focus on user-visible behavior and expected outcomes.
+- Do NOT repeat the requested changes — the developer already has those. This section is about HOW TO TEST, not what to build.
+- Do NOT include timestamps (no "at 0:59", no "shown at 1:10").
+- Do NOT describe what the PM showed — describe what the tester should verify.
 - Max 10 bullets."""
     return _gemini_text(prompt, gemini_file=gemini_file)
 
@@ -612,33 +585,27 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
             traceback.print_exc()
             rag_context, rag_context_text, resolved_files = {}, "(not available)", []
 
-        # ── Phase 4: Cursor instructions — 4 focused parallel calls ─────
-        print(f"\n[{label}] --- Phase 4: Generating Cursor instructions (4 parallel sections) ---")
+        # ── Phase 4: Cursor instructions — 3 focused parallel calls ─────
+        print(f"\n[{label}] --- Phase 4: Generating Cursor instructions (3 parallel sections) ---")
         spec_json = json.dumps(spec, ensure_ascii=False, indent=2)
-        moments_text = json.dumps(moments, ensure_ascii=False, indent=2) if moments else "(none)"
 
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=3) as pool:
             fut_changes = pool.submit(
                 _generate_changes_section,
-                gemini_file, spec_json, rag_context_text, transcript, moments_text,
-            )
-            fut_files = pool.submit(
-                _generate_files_section,
-                gemini_file, spec_json, rag_context_text, resolved_files,
+                gemini_file, spec_json, rag_context_text, transcript,
             )
             fut_constraints = pool.submit(
                 _generate_constraints_section,
-                gemini_file, spec_json, rag_context_text, transcript, moments_text,
+                gemini_file, spec_json, rag_context_text, transcript,
             )
             fut_checklist = pool.submit(
                 _generate_checklist_section,
-                gemini_file, spec_json, transcript, moments_text,
+                gemini_file, spec_json, transcript,
             )
 
             sections: dict[str, str] = {}
             for name, fut in [
                 ("changes", fut_changes),
-                ("files", fut_files),
                 ("constraints", fut_constraints),
                 ("checklist", fut_checklist),
             ]:
@@ -649,23 +616,22 @@ def run(s3_bucket: str, s3_key: str, task_id: str = "") -> dict:
                     print(f"[{label}] Section '{name}' failed: {exc}")
                     sections[name] = ""
 
+        parts = [
+            sections.get("changes", ""),
+            sections.get("constraints", ""),
+            sections.get("checklist", ""),
+        ]
+
+        if resolved_files:
+            files_section = "## Files to open\n\n" + "\n".join(f"@{p}" for p in resolved_files)
+            parts.append(files_section)
+
         instructions = "\n\n".join(
-            part.strip()
-            for part in [
-                sections.get("changes", ""),
-                sections.get("files", ""),
-                sections.get("constraints", ""),
-                sections.get("checklist", ""),
-            ]
-            if part and part.strip()
+            part.strip() for part in parts if part and part.strip()
         ).strip()
 
         if not instructions:
             raise RuntimeError("Step 5 instruction generation produced empty output.")
-
-        if resolved_files:
-            instructions += "\n\n## Files to open\n\n"
-            instructions += "\n".join(f"@{p}" for p in resolved_files)
 
         print(f"\n[{label}] Done.")
 
